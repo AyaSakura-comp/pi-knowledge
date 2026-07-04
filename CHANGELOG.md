@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.7] - 2026-07-04
+
+### Fixed
+- Avoided live SQLite statement iterators in chunk row scans so search, diagnostics, and vector rebuild paths cannot leave the database connection busy before `knowledge_update`.
+- Coalesced overlapping `knowledge_update` calls per knowledge base so watcher-triggered updates, manual updates, retries, and shutdown do not re-enter the same update flow.
+
+### Changed
+- Increased SQLite busy timeout to tolerate short-lived external contention during long indexing/update work.
+- Updated npm-facing README and package metadata to show Pi and OMP (`omp.sh`) coding-agent support.
+
 ## [0.4.6] - 2026-06-26
 
 ### Fixed

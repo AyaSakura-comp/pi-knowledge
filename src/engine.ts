@@ -102,6 +102,8 @@ export interface AddOptions {
 	exclude_paths?: string[];
 }
 
+type UpdateableKnowledgeBase = KnowledgeBase & { source_path: string };
+
 interface ImportedChunk {
 	content: string;
 	file_path: string;
@@ -513,6 +515,7 @@ function normalizeExtractedText(text: string | string[]): string {
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
+	private activeUpdates = new Map<string, Promise<{ added: number; removed: number; unchanged: number }>>();
 
 	async initialize(knowledgeDir: string): Promise<void> {
 		this.knowledgeDir = knowledgeDir;
@@ -804,7 +807,27 @@ export class KnowledgeEngine {
 		if (!kb.source_path || (kb.source_type !== "url" && !existsSync(kb.source_path))) {
 			throw new Error(`Source path not available or missing: ${kb.source_path}`);
 		}
+		const updateableKB: UpdateableKnowledgeBase = { ...kb, source_path: kb.source_path };
 
+		const activeUpdate = this.activeUpdates.get(updateableKB.id);
+		if (activeUpdate) {
+			onProgress?.(`Update already running for "${updateableKB.name}"; waiting for the active update.`);
+			return activeUpdate;
+		}
+
+		const updateRun = this.runUpdate(updateableKB, onProgress, signal).finally(() => {
+			if (this.activeUpdates.get(updateableKB.id) === updateRun) this.activeUpdates.delete(updateableKB.id);
+		});
+		this.activeUpdates.set(updateableKB.id, updateRun);
+		return updateRun;
+	}
+
+	private async runUpdate(
+		kb: UpdateableKnowledgeBase,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+	): Promise<{ added: number; removed: number; unchanged: number }> {
+		if (!this.db) throw new Error("Engine not initialized");
 		updateKBStatus(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
@@ -1579,6 +1602,8 @@ export class KnowledgeEngine {
 	}
 
 	async dispose(options: { disposeModels?: boolean } = {}): Promise<void> {
+		const activeUpdates = [...this.activeUpdates.values()];
+		if (activeUpdates.length > 0) await Promise.allSettled(activeUpdates);
 		const disposeModels = options.disposeModels ?? true;
 		if (disposeModels) {
 			await disposeEmbedding();

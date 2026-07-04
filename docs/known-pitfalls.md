@@ -72,6 +72,12 @@ JSONL export 是分享格式，不是原機器 source manifest。不要把本機
 
 `fs.watch(dir, { recursive: true })` 在 macOS/Node 環境中仍可能因 `EMFILE: too many open files` 或平台限制失效。`startWatcher` 必須保留 polling fallback；狀態顯示的 active watcher count 應計入 native watcher 或 poller。測試 watcher 時至少等待 `POLL_MS + DEBOUNCE_MS`。
 
+## SQLite iterator/update lifecycle
+
+`better-sqlite3` 的 `.iterate()` 會讓 statement lifecycle 跟 JS iterator 消費方式綁在一起。Search、status、doctor 或 vector rebuild 如果中途 break、return、throw，後續同一 connection 的 write 可能遇到 `This database connection is busy executing a query`。Production paths 不應把 live SQLite iterator 傳入可能提前返回的 helper，也不應在 live `chunks` iterator 迴圈內寫 DB。改用 bounded `.all()` 分頁 generator，讓每批 query statement 在 yield 前已完成。
+
+`knowledge_update` 還必須以 KB id 做 in-flight coalescing。Watcher 自動更新、手動 `knowledge_update`、重試與 shutdown 都可能重疊；guard state 必須在任何可 yield 的 work 前建立，dispose 必須等待 active update settle 後再關 DB。
+
 ## Pi virtual modules vs Node import
 
 Pi binary 會以 virtual modules 提供 `@earendil-works/pi-*` 和 `typebox`，但裸 Node / CI 不會。Package entry 應避免 runtime import 這些 module，或把它們列入 dependency。pi-knowledge 透過 `extension.js` shim 載入已 build 的 `dist/index.js`，並在本地未 build 時 fallback 到 source `index.ts`。至少要通過：

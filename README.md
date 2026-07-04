@@ -1,14 +1,14 @@
 # pi-knowledge
 
-Local-first RAG knowledge base for Pi agents.
+Local-first RAG knowledge base for Pi and OMP coding agents.
 
-Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
+Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi and [OMP](https://omp.sh/) can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
 
-Built as a native [Pi extension](https://pi.dev/docs/latest/extensions), deeply integrated with the agent lifecycle. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
+Built as a native [Pi extension](https://pi.dev/docs/latest/extensions) with verified [OMP](https://omp.sh/) compatibility through the packaged extension entry. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
 
 ## Why It Matters
 
-Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi durable, searchable project memory:
+Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi and OMP durable, searchable project memory:
 
 - Search code and documentation by meaning, exact symbols, or both.
 - Keep private source data local by default.
@@ -74,11 +74,15 @@ In project-level dogfood, these changes improved a real codebase evaluation from
 ## Quick Start
 
 ```bash
-# Install
+# Install for Pi
 pi install npm:pi-knowledge
+
+# Install for OMP
+omp install npm:pi-knowledge
 
 # Or from source
 pi install ./pi-knowledge
+omp install ./pi-knowledge
 
 # Index a directory
 # (agent will call knowledge_add automatically, or you can ask it)
@@ -170,7 +174,7 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 
 ## Pi and OMP Support
 
-`pi-knowledge` supports Pi and OMP-compatible extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
+`pi-knowledge` supports Pi and [OMP](https://omp.sh/) extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
 
 Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
 

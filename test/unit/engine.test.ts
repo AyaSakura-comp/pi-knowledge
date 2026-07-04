@@ -252,6 +252,61 @@ describe("KnowledgeEngine", () => {
 	});
 
 	describe("update", () => {
+		it("updates after search and diagnostics without leaving the database busy", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-update-after-read-"));
+			try {
+				writeFileSync(
+					join(projectDir, "a.txt"),
+					"Initial ReadThenUpdateToken content about indexing reliability and vector search. ".repeat(3),
+				);
+				writeFileSync(
+					join(projectDir, "b.txt"),
+					"Supporting ReadThenUpdateToken material about diagnostics and status checks. ".repeat(3),
+				);
+				await engine.add(projectDir, "Read Then Update");
+
+				const search = await engine.search("ReadThenUpdateToken reliability", { mode: "hybrid", limit: 1 });
+				const diagnostics = engine.diagnose();
+				const report = engine.doctor();
+				writeFileSync(
+					join(projectDir, "a.txt"),
+					"Changed BusyRegressionToken content about indexing reliability and vector search. ".repeat(3),
+				);
+
+				const result = await engine.update("Read Then Update");
+				const updated = await engine.search("BusyRegressionToken", { mode: "fast", limit: 1 });
+
+				expect(search.total_count).toBeGreaterThan(0);
+				expect(diagnostics).toHaveLength(1);
+				expect(report.health_score).toBeGreaterThan(0);
+				expect(result.added).toBe(1);
+				expect(result.removed).toBe(1);
+				expect(updated.total_count).toBeGreaterThan(0);
+				expect(engine.list()[0].status).toBe("ready");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("coalesces overlapping updates for the same knowledge base", async () => {
+			const filePath = join(TEST_DIR, "coalesce.txt");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(filePath, "Original coalesced update content about stable indexing.");
+			await engine.add(filePath, "Coalesced Update");
+			writeFileSync(filePath, "Changed CoalescedUpdateToken content about stable indexing.");
+			const secondUpdates: string[] = [];
+
+			const first = engine.update("Coalesced Update");
+			const second = engine.update("Coalesced Update", (message) => secondUpdates.push(message));
+			const [firstResult, secondResult] = await Promise.all([first, second]);
+
+			expect(secondUpdates).toContain('Update already running for "Coalesced Update"; waiting for the active update.');
+			expect(secondResult).toEqual(firstResult);
+			expect(firstResult.added).toBe(1);
+			expect(firstResult.removed).toBe(1);
+			expect(engine.list()[0].status).toBe("ready");
+		});
+
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
 			vi.stubGlobal(

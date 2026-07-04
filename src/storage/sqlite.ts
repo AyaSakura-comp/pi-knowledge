@@ -57,6 +57,7 @@ export interface Chunk {
 export type ChunkInsert = Omit<Chunk, "id" | "kb_id" | "indexed_at">;
 
 const SCHEMA_VERSION = 3;
+const ITERATION_BATCH_SIZE = 500;
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -256,7 +257,7 @@ export function openDatabase(knowledgeDir?: string): Database.Database {
 	const nativeBinding = isBunRuntime() ? undefined : findBetterSqlite3NativeBinding();
 	const db = nativeBinding ? new Database(dbPath, { nativeBinding }) : new Database(dbPath);
 	applyPragma(db, "journal_mode = WAL");
-	applyPragma(db, "busy_timeout = 5000");
+	applyPragma(db, "busy_timeout = 60000");
 	applyPragma(db, "foreign_keys = ON");
 
 	const hasVersion = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'").get();
@@ -511,7 +512,7 @@ export function getChunksByKB(db: Database.Database, kbId: string): Chunk[] {
 }
 
 export function iterateChunksByKB(db: Database.Database, kbId: string): IterableIterator<Chunk> {
-	return db.prepare("SELECT * FROM chunks WHERE kb_id = ? ORDER BY rowid").iterate(kbId) as IterableIterator<Chunk>;
+	return iterateChunkRowsByKB(db, kbId);
 }
 
 export function getChunkIdsByKB(db: Database.Database, kbId: string): string[] {
@@ -520,9 +521,7 @@ export function getChunkIdsByKB(db: Database.Database, kbId: string): string[] {
 }
 
 export function iterateChunkIdsByKB(db: Database.Database, kbId: string): IterableIterator<{ id: string }> {
-	return db.prepare("SELECT id FROM chunks WHERE kb_id = ? ORDER BY rowid").iterate(kbId) as IterableIterator<{
-		id: string;
-	}>;
+	return iterateChunkIdRowsByKB(db, kbId);
 }
 
 export function getChunkById(db: Database.Database, id: string): Chunk | undefined {
@@ -577,12 +576,69 @@ export function iterateChunkHashesByKB(
 	db: Database.Database,
 	kbId: string,
 ): IterableIterator<{ id: string; content_hash: string }> {
-	return db
-		.prepare("SELECT id, content_hash FROM chunks WHERE kb_id = ? ORDER BY rowid")
-		.iterate(kbId) as IterableIterator<{
-		id: string;
-		content_hash: string;
-	}>;
+	return iterateChunkHashRowsByKB(db, kbId);
+}
+
+function* iterateChunkRowsByKB(db: Database.Database, kbId: string): IterableIterator<Chunk> {
+	let lastRowid = 0;
+	const statement = db.prepare(
+		`SELECT rowid as rowid, * FROM chunks
+		 WHERE kb_id = ? AND rowid > ?
+		 ORDER BY rowid
+		 LIMIT ?`,
+	);
+	while (true) {
+		const rows = statement.all(kbId, lastRowid, ITERATION_BATCH_SIZE) as Array<Chunk & { rowid: number }>;
+		if (rows.length === 0) return;
+		for (const row of rows) {
+			lastRowid = row.rowid;
+			const { rowid: _rowid, ...chunk } = row;
+			yield chunk;
+		}
+	}
+}
+
+function* iterateChunkIdRowsByKB(db: Database.Database, kbId: string): IterableIterator<{ id: string }> {
+	let lastRowid = 0;
+	const statement = db.prepare(
+		`SELECT rowid, id FROM chunks
+		 WHERE kb_id = ? AND rowid > ?
+		 ORDER BY rowid
+		 LIMIT ?`,
+	);
+	while (true) {
+		const rows = statement.all(kbId, lastRowid, ITERATION_BATCH_SIZE) as Array<{ rowid: number; id: string }>;
+		if (rows.length === 0) return;
+		for (const row of rows) {
+			lastRowid = row.rowid;
+			yield { id: row.id };
+		}
+	}
+}
+
+function* iterateChunkHashRowsByKB(
+	db: Database.Database,
+	kbId: string,
+): IterableIterator<{ id: string; content_hash: string }> {
+	let lastRowid = 0;
+	const statement = db.prepare(
+		`SELECT rowid, id, content_hash FROM chunks
+		 WHERE kb_id = ? AND rowid > ?
+		 ORDER BY rowid
+		 LIMIT ?`,
+	);
+	while (true) {
+		const rows = statement.all(kbId, lastRowid, ITERATION_BATCH_SIZE) as Array<{
+			rowid: number;
+			id: string;
+			content_hash: string;
+		}>;
+		if (rows.length === 0) return;
+		for (const row of rows) {
+			lastRowid = row.rowid;
+			yield { id: row.id, content_hash: row.content_hash };
+		}
+	}
 }
 
 export function getChunkCount(db: Database.Database, kbId: string): number {
