@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1] - 2026-07-07
+
+### Fixed
+- Indexed PDF/DOC/DOCX files discovered during directory add and update through the document extractors instead of treating them as binary skips.
+- Skipped failed directory document extraction as `extraction_failed` without failing the whole knowledge base.
+- Required explicit `confirm: true` for public destructive `knowledge_remove` and `knowledge_clear` tool calls.
+- Aligned `path_pattern` documentation and tool guidance with the implemented substring filter behavior.
+
 ## [0.5.0] - 2026-07-07
 
 ### Added

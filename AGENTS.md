@@ -96,6 +96,7 @@
 - Directory KB update behavior must preserve confirmed scope options. If `knowledge_add` included suggested-excluded text via `include_suggested_text`, `include_paths`, or `exclude_paths`, `knowledge_update` must reuse those persisted source options instead of silently dropping or adding files.
 - Import/export must remain portable across machines. Do not export local absolute source paths as active update sources.
 - Remove/clear are data-deletion operations, not only SQLite metadata deletion. They must delete KB vector files and must not run while add/update/import mutations are active or after engine shutdown has started.
+- Public destructive tools (`knowledge_remove` and `knowledge_clear`) require explicit user confirmation and must be called with `confirm: true`.
 - `knowledge_search` score semantics are "higher is better" after leaving search modules, including BM25 fast mode.
 - `knowledge_status` diagnostics must handle directory, single-file, text, and URL KBs without false stale/orphan reports, and must surface stale `indexing` state left by interrupted runs. `knowledge_search` must skip non-ready/non-stale KBs rather than searching partial `indexing` or `error` data.
 - File watching must keep the polling fallback; native `fs.watch` can fail or stop under local resource limits.

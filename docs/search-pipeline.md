@@ -163,7 +163,7 @@ function applyFilters(results: SearchResult[], filters: SearchFilters): SearchRe
   return results.filter(r => {
     if (filters.file_type && r.chunk.file_type !== filters.file_type) return false;
     if (filters.kb_name && r.kb_name !== filters.kb_name) return false;
-    if (filters.path_pattern && !matchGlob(filters.path_pattern, r.chunk.file_path)) return false;
+    if (filters.path_pattern && !r.chunk.file_path.includes(filters.path_pattern)) return false;
     return true;
   });
 }

@@ -6,53 +6,51 @@ import type { ChunkInsert } from "../storage/sqlite.ts";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-const BINARY_EXTENSIONS = new Set([
-	".png",
-	".jpg",
-	".jpeg",
-	".gif",
-	".ico",
-	".bmp",
-	".webp",
-	".svg",
-	".woff",
-	".woff2",
-	".ttf",
-	".eot",
-	".otf",
-	".zip",
-	".gz",
-	".tar",
-	".bz2",
-	".7z",
-	".rar",
-	".pdf",
-	".doc",
-	".docx",
-	".xls",
-	".xlsx",
-	".ppt",
-	".exe",
-	".dll",
-	".so",
-	".dylib",
-	".node",
-	".db",
-	".sqlite",
-	".bin",
-	".dat",
-	".lock",
-	".mp3",
-	".mp4",
-	".wav",
-	".avi",
-	".mov",
-	".webm",
-	".wasm",
-	".o",
-	".a",
-	".lib",
-]);
+const DOCUMENT_EXTENSIONS: Record<string, true> = { ".doc": true, ".docx": true, ".pdf": true };
+
+const BINARY_EXTENSIONS: Record<string, true> = {
+	".7z": true,
+	".a": true,
+	".avi": true,
+	".bin": true,
+	".bmp": true,
+	".bz2": true,
+	".dat": true,
+	".db": true,
+	".dll": true,
+	".dylib": true,
+	".eot": true,
+	".exe": true,
+	".gif": true,
+	".gz": true,
+	".ico": true,
+	".jpg": true,
+	".jpeg": true,
+	".lib": true,
+	".lock": true,
+	".mov": true,
+	".mp3": true,
+	".mp4": true,
+	".node": true,
+	".o": true,
+	".otf": true,
+	".ppt": true,
+	".rar": true,
+	".so": true,
+	".sqlite": true,
+	".svg": true,
+	".tar": true,
+	".ttf": true,
+	".wasm": true,
+	".wav": true,
+	".webm": true,
+	".webp": true,
+	".woff": true,
+	".woff2": true,
+	".xls": true,
+	".xlsx": true,
+	".zip": true,
+};
 
 const DEFAULT_SUGGESTED_EXCLUDE = [
 	"node_modules",
@@ -128,7 +126,7 @@ export interface ScannableFile {
 
 export interface SkippedScanEntry {
 	path: string;
-	reason: "suggested_excluded" | "oversized" | "binary" | "unreadable" | "inaccessible";
+	reason: "suggested_excluded" | "oversized" | "binary" | "unreadable" | "inaccessible" | "extraction_failed";
 	size?: number;
 }
 
@@ -152,6 +150,7 @@ export function createSkippedScanStats(): ScanResult["skipped"] {
 			binary: 0,
 			unreadable: 0,
 			inaccessible: 0,
+			extraction_failed: 0,
 		},
 		samples: [],
 	};
@@ -161,6 +160,10 @@ function addSkipped(skipped: ScanResult["skipped"], entry: SkippedScanEntry): vo
 	skipped.total++;
 	skipped.by_reason[entry.reason]++;
 	if (skipped.samples.length < MAX_SKIPPED_SAMPLES) skipped.samples.push(entry);
+}
+
+export function addSkippedScanEntry(skipped: ScanResult["skipped"], entry: SkippedScanEntry): void {
+	addSkipped(skipped, entry);
 }
 
 export function summarizeSkippedScan(skipped: ScanResult["skipped"]): string {
@@ -202,6 +205,9 @@ function detectFileType(filePath: string): string {
 		".zsh": "shell",
 		".sql": "sql",
 		".graphql": "graphql",
+		".pdf": "pdf",
+		".doc": "docx",
+		".docx": "docx",
 		".txt": "text",
 		".csv": "text",
 		".log": "text",
@@ -209,8 +215,13 @@ function detectFileType(filePath: string): string {
 	return map[ext] ?? "text";
 }
 
+export function isSupportedDocumentFile(filePath: string): boolean {
+	return DOCUMENT_EXTENSIONS[extname(filePath).toLowerCase()] === true;
+}
+
 function isBinaryFile(filePath: string): boolean {
-	if (BINARY_EXTENSIONS.has(extname(filePath).toLowerCase())) return true;
+	if (isSupportedDocumentFile(filePath)) return false;
+	if (BINARY_EXTENSIONS[extname(filePath).toLowerCase()] === true) return true;
 	let fd: number | undefined;
 	try {
 		fd = openSync(filePath, "r");

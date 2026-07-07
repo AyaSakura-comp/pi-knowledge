@@ -42,9 +42,11 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 
 Search diagnostics include result provenance in both text output and structured `details`: chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
 
+`knowledge_search` supports `file_type` and `path_pattern` filters. `hybrid` mode is lexical-anchored to prevent low-evidence semantic false positives; use `semantic` when the query is conceptual and exact terms may differ from indexed wording.
+
 `knowledge_doctor` emits both human-readable issues and machine-readable actions in structured `details`. Action codes include `run_update`, `rebuild_kb`, `wait_for_indexing`, `review_skipped_scope`, `rebuild_vectors`, `check_source`, and `none`. Agents should prefer these action codes over parsing the English action text.
 
-`knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find code symbols, route-like handlers, Markdown headings, config keys, and environment variables. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
+`knowledge_symbol_search` uses a lightweight declaration-pattern index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find common code symbols, route-like handlers, Markdown headings, config keys, and environment variables. It is not a full LSP or code graph; for methods, uncommon syntax, or empty important lookups, use `knowledge_search` mode `fast`/`adaptive` and check `knowledge_doctor` for stale or missing symbol metadata. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
 
 ## Test and Release Fixtures
 

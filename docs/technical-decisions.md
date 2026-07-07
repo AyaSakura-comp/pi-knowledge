@@ -256,6 +256,7 @@
 
 **決策**:
 - hard skip 只用於技術不可索引或會破壞穩定性的內容: unsupported binary/non-text、oversized、unreadable、inaccessible、無法抽取文字的文件。
+- 支援的文件格式（PDF/DOC/DOCX）是可索引來源，不因二進位副檔名樣貌而被 directory scan 當成 binary skip；單檔與 directory add/update 都必須走同一套 extractor。
 - `.env`、private-key-looking text、credential/secret-named text、generated report、lockfile、vendor text、build output text、runtime/cache text 是 suggested exclusion，不是永久 hard block。
 - `knowledge_plan` 是 no-write inspection tool，讓 agent 在建立 KB 前先回報 scannable files、suggested exclusions、technical skips，再請使用者確認。
 - `knowledge_add` 預設可以略過 suggested exclusions，但必須提供 `include_suggested_text` 與 focused `include_paths` 讓 agent 在使用者確認後納入。

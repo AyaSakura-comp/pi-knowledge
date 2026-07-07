@@ -22,7 +22,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 ## Highlights
 
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
-- **Hybrid retrieval**: semantic vectors + BM25 keyword search + normalized weighted score fusion.
+- **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
 - **Code-aware indexing**: AST-aware chunking for TypeScript/JavaScript, Python, Go, Rust, and Java.
 - **Lightweight symbol lookup**: indexes functions, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
@@ -65,7 +65,7 @@ TUI rendering currently uses Pi's stable default tool rendering plus targeted re
 - **RAG-native project memory**: follows the Retrieval-Augmented Generation pattern from Lewis et al. 2020: keep source truth outside the model, retrieve it at answer time, and inject only relevant context.
 - **Dense semantic recall**: uses multilingual dense embeddings in the spirit of Dense Passage Retrieval (Karpukhin et al. 2020), so conceptual queries can find code/docs even when wording differs.
 - **Contextual Retrieval without remote chunk rewriting**: applies Anthropic's Contextual Retrieval insight locally by embedding file path, file type, Markdown breadcrumbs, and code symbols with each chunk. This improves standalone chunk meaning without sending private source chunks to an LLM for context generation.
-- **Hybrid retrieval with diagnosable scores**: combines BM25 and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
+- **Hybrid retrieval with diagnosable scores**: combines lexical BM25 anchors and vectors with normalized weighted score fusion. RRF (Cormack et al. 2009) remains the baseline reference, but weighted fusion is used by default because project dogfood showed RRF compressed scores too much for ranking diagnostics.
 - **MMR-style diversity**: uses Maximal Marginal Relevance ideas (Goldstein and Carbonell 1998), file interleaving, vector redundancy checks, and adaptive-window overlap collapse so repeated README or same-file chunks do not dominate top results.
 - **Intent-aware and self-correcting agent UX**: mode selection (`auto`, `fast`, `semantic`, `hybrid`, `adaptive`, `deep`), ranking diagnostics, and `knowledge_doctor` turn retrieval failures into concrete next actions instead of silent bad answers.
 - **Confidence gating**: low-evidence hybrid matches can return zero results instead of unrelated chunks, reducing false confidence when the KB does not contain the answer.
@@ -101,16 +101,16 @@ omp install ./pi-knowledge
 
 | Tool | Description |
 |------|-------------|
-| `knowledge_plan` | Inspect an indexing source before writing a KB; reports scannable files, suggested exclusions, and technical skips |
+| `knowledge_plan` | Inspect an indexing source before writing a KB; reports scannable counts, suggested exclusions, and technical skips |
 | `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
-| `knowledge_search` | Hybrid, deep, or adaptive search across one or all knowledge bases |
-| `knowledge_symbol_search` | Exact or substring lookup for code symbols, route-like handlers, Markdown headings, config keys, and env vars |
-| `knowledge_remove` | Remove a knowledge base by name or ID |
-| `knowledge_update` | Incrementally re-index changed files in a knowledge base |
+| `knowledge_search` | Fast, semantic, lexical-anchored hybrid, deep, or adaptive search across one or all knowledge bases; supports file-type and path filters |
+| `knowledge_symbol_search` | Lightweight exact or substring lookup for code symbols, route-like handlers, Markdown headings, config keys, and env vars; fall back to `knowledge_search` for methods or uncommon syntax |
+| `knowledge_remove` | Remove a knowledge base by name or ID after `confirm: true` |
+| `knowledge_update` | Incrementally re-index changed files in a source-backed file, directory, or URL knowledge base |
 | `knowledge_show` | List all knowledge bases with stats |
 | `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
 | `knowledge_doctor` | Diagnose health score, skipped files, stuck jobs, stale data, and recommended fixes |
-| `knowledge_clear` | Remove all knowledge bases |
+| `knowledge_clear` | Remove all knowledge bases after `confirm: true` |
 | `knowledge_export` | Export a KB to shareable JSONL file |
 | `knowledge_import` | Import a KB from JSONL (re-embeds content) |
 
@@ -118,17 +118,17 @@ omp install ./pi-knowledge
 
 - `fast`: BM25 keyword search for exact symbols, commands, and identifiers.
 - `semantic`: vector search for conceptual matches.
-- `hybrid`: BM25 + vector search with normalized weighted score fusion.
+- `hybrid`: lexical-anchored BM25 + vector search with normalized weighted score fusion. It requires keyword evidence to avoid low-confidence semantic false positives.
 - `deep`: hybrid retrieval followed by cross-encoder reranking.
 - `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
 - `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
-- `code`, `config`, `errors`, `docs`, `decision`: intent aliases for agents. `code`, `config`, and `errors` bias toward exact lexical/symbol evidence; `docs` and `decision` keep hybrid recall while making the intended source type explicit.
+- `code`, `config`, `errors`, `docs`, `decision`: intent aliases for agents. `code`, `config`, and `errors` bias toward exact lexical/symbol evidence; `docs` and `decision` keep the intended source type explicit.
 
 Mode selection contract:
 
-- Start with `hybrid` for most project questions.
+- Start with `hybrid` for most project questions that contain useful lexical anchors.
 - Use `fast` for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings.
-- Use `semantic` when the query is conceptual and exact terms may differ from the indexed wording.
+- Use `semantic` when the query is conceptual, exact terms may differ from indexed wording, or hybrid returns no lexical matches.
 - Use `adaptive` when the answer needs nearby code, neighboring documentation sections, or enough context to make a safe edit.
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.

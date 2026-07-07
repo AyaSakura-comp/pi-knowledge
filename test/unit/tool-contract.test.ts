@@ -36,6 +36,9 @@ const toolState = vi.hoisted(() => ({
 		has_more: false,
 		mode_used: "hybrid",
 	},
+	searchOptions: undefined as unknown,
+	removeTargets: [] as string[],
+	clearCalls: 0,
 	doctorReport: {
 		health_score: 65,
 		summary: "1 blocking, 0 warning, 0 info issues.",
@@ -80,7 +83,8 @@ vi.mock("../../src/engine.ts", () => ({
 			return [];
 		}
 
-		async search(): Promise<typeof toolState.searchResponse> {
+		async search(_query: string, options: unknown): Promise<typeof toolState.searchResponse> {
+			toolState.searchOptions = options;
 			return toolState.searchResponse;
 		}
 
@@ -92,6 +96,15 @@ vi.mock("../../src/engine.ts", () => ({
 		async update(_target: string, _onProgress: unknown, signal?: AbortSignal): Promise<unknown> {
 			if (signal?.aborted) throw new Error("Cancelled");
 			return { added: 0, removed: 0, unchanged: 0 };
+		}
+
+		remove(target: string): boolean {
+			toolState.removeTargets.push(target);
+			return true;
+		}
+
+		clear(): void {
+			toolState.clearCalls++;
 		}
 
 		doctor(signal?: AbortSignal): typeof toolState.doctorReport {
@@ -125,6 +138,9 @@ vi.mock("../../src/watcher/file-watcher.ts", () => ({
 describe("public tool contracts", () => {
 	beforeEach(() => {
 		vi.resetModules();
+		toolState.searchOptions = undefined;
+		toolState.removeTargets = [];
+		toolState.clearCalls = 0;
 	});
 
 	it("exposes structured doctor actions", async () => {
@@ -148,6 +164,59 @@ describe("public tool contracts", () => {
 		expect(result?.details).toEqual(toolState.searchResponse);
 		expect(result?.content[0].text).toContain("indexed_at=123");
 		expect(result?.content[0].text).toContain("source_mtime=456");
+	});
+
+	it("passes path_pattern from the search tool into engine filters", async () => {
+		const tools = await registeredTools();
+
+		await tools.knowledge_search.execute?.(
+			"search",
+			{ query: "search", path_pattern: "src/engine.ts", file_type: "typescript" },
+			undefined,
+			undefined,
+			undefined,
+		);
+
+		expect(toolState.searchOptions).toMatchObject({
+			filters: { file_type: "typescript", path_pattern: "src/engine.ts" },
+		});
+	});
+
+	it("requires explicit confirmation before destructive remove and clear wrapper calls", async () => {
+		const tools = await registeredTools();
+
+		await expect(
+			tools.knowledge_remove.execute?.("remove", { target: "repo" }, undefined, undefined, undefined),
+		).rejects.toThrow(/confirm=true/i);
+		await expect(tools.knowledge_clear.execute?.("clear", {}, undefined, undefined, undefined)).rejects.toThrow(
+			/confirm=true/i,
+		);
+		expect(toolState.removeTargets).toEqual([]);
+		expect(toolState.clearCalls).toBe(0);
+
+		await expect(
+			tools.knowledge_remove.execute?.("remove", { target: "repo", confirm: true }, undefined, undefined, undefined),
+		).resolves.toMatchObject({ content: [{ text: "Removed." }] });
+		await expect(
+			tools.knowledge_clear.execute?.("clear", { confirm: true }, undefined, undefined, undefined),
+		).resolves.toMatchObject({ content: [{ text: "All knowledge bases cleared." }] });
+		expect(toolState.removeTargets).toEqual(["repo"]);
+		expect(toolState.clearCalls).toBe(1);
+	});
+
+	it("guides empty symbol lookups toward fallback search and doctor checks", async () => {
+		const tools = await registeredTools();
+
+		const result = await tools.knowledge_symbol_search.execute?.(
+			"symbols",
+			{ query: "missingSymbol", exact: true },
+			undefined,
+			undefined,
+			undefined,
+		);
+
+		expect(result?.content[0].text).toMatch(/knowledge_search/i);
+		expect(result?.content[0].text).toMatch(/knowledge_doctor/i);
 	});
 
 	it("propagates cancellation to directory planning and update execution", async () => {

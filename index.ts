@@ -233,7 +233,7 @@ export default function (pi: ExtensionAPI) {
 		const kbs = engine.list();
 		if (kbs.length === 0) return undefined;
 		const desc = kbs.map((kb) => `"${kb.name}" (${kb.chunk_count} chunks, ${kb.file_count} files)`).join(", ");
-		const guidance = `Available knowledge bases: ${desc}. Use knowledge_search before answering domain questions.`;
+		const guidance = `Available knowledge bases: ${desc}. Use knowledge_symbol_search for exact symbols/config keys/env vars/routes/headings, then use knowledge_search for broader domain or implementation context.`;
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n${guidance}`,
 		};
@@ -243,11 +243,11 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_plan",
 		label: "Knowledge Plan",
 		description:
-			"Inspect an indexing source without writing a KB, showing scannable files, suggested exclusions, and technical skips",
+			"Inspect an indexing source without writing a KB, showing scannable counts, suggested exclusions, and technical skips",
 		promptSnippet: "Plan a knowledge-base indexing scope before calling knowledge_add",
 		promptGuidelines: [
 			"Use knowledge_plan before knowledge_add for broad directories, large repositories, or sources that may contain private or low-signal text",
-			"Show the user suggested exclusions and technical skips before asking whether to include risky or low-signal text",
+			"Show the user suggested exclusions, technical skips, and scannable file counts before asking whether to include risky or low-signal text",
 			"After the user confirms scope, call knowledge_add with matching include_suggested_text, include_paths, or exclude_paths",
 			"Do not use knowledge_plan as a substitute for knowledge_search; it only plans indexing scope",
 		],
@@ -314,14 +314,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_add",
 		label: "Knowledge Add",
-		description: "Index files, directories, or text into a named knowledge base for semantic search",
-		promptSnippet: "Index files/dirs/text into a searchable knowledge base",
+		description: "Index files, directories, URLs, PDFs, DOCX, or text into a named knowledge base for semantic search",
+		promptSnippet: "Index files/dirs/URLs/PDFs/DOCX/text into a searchable knowledge base",
 		promptGuidelines: [
 			"Use knowledge_plan first for broad directories, large repositories, or sources that may contain private or low-signal text",
-			"Use knowledge_add when the user asks to index, remember, or learn from files or documentation",
-			"Prefer one knowledge_add call for the project root or relevant directory with include_paths/exclude_paths; do not call it once per file",
-			"If a knowledge base with the same name already exists, use knowledge_update or ask before replacing it",
-			"Index source, documentation, and ordinary configuration files that explain how the project works",
+			"Use knowledge_add when the user asks to index, remember, or learn from files, URLs, documents, or documentation",
+			"Pass http:// or https:// sources directly for URL indexing",
+			"Prefer one knowledge_add call for the project root or relevant directory with include_paths/exclude_paths; do not call it once per ordinary source file",
+			"If the source looks like a local path, verify it exists before calling knowledge_add; non-existing non-URL path-like sources are rejected instead of treated as inline text",
+			"If a knowledge base with the same name already exists, use knowledge_update only to refresh that KB's existing retained source; otherwise ask before removing/replacing it",
+			"Index source, documentation, supported document files, and ordinary configuration files that explain how the project works",
 			"Default directory indexing suggests excluding generated, vendor, browser runtime, obvious secret, and low-signal text artifacts; these are not permanent blocks",
 			"For ambiguous or risky text such as .env, private keys, certificates, credential-named files, settings.json, appsettings.json, cloud config, editor config, generated reports, lockfiles, or vendor text, explain the tradeoff and ask the user before including it",
 			"If the user confirms a suggested-excluded text file or directory should be indexed, call knowledge_add with include_suggested_text or a focused include_paths value so the tool follows the confirmed scope",
@@ -329,7 +331,7 @@ export default function (pi: ExtensionAPI) {
 			"Provide a descriptive name for this single knowledge base",
 		],
 		parameters: Type.Object({
-			source: Type.String({ description: "File path, directory path, or inline text to index" }),
+			source: Type.String({ description: "File path, directory path, URL, PDF/DOCX path, or inline text to index" }),
 			name: Type.String({ description: "Display name for this knowledge base" }),
 			include_suggested_text: Type.Optional(
 				Type.Boolean({
@@ -408,13 +410,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_search",
 		label: "Knowledge Search",
-		description: "Search indexed knowledge bases using hybrid semantic + keyword search",
-		promptSnippet: "Search knowledge bases (hybrid BM25 + semantic + weighted score fusion)",
+		description: "Search indexed knowledge bases using lexical BM25, semantic vectors, reranking, and filters",
+		promptSnippet: "Search knowledge bases (hybrid is lexical-anchored BM25 + semantic fusion)",
 		promptGuidelines: [
 			"Use knowledge_search to find relevant context before answering domain questions",
-			"Default to mode 'hybrid' for most project questions because it combines lexical anchors with semantic recall",
+			"Default to mode 'hybrid' for most project questions with useful lexical anchors; it fuses BM25 and semantic vectors but still requires keyword evidence",
 			"Use mode 'fast' for exact symbols, filenames, commands, error codes, API names, config keys, or quoted strings",
-			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording",
+			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording or hybrid returns no lexical matches",
 			"Use mode 'adaptive' when the user needs surrounding implementation context, related nearby sections, or enough context to make a code change",
 			"Use mode 'deep' for high-stakes answers, ambiguous top results, or final verification where slower cross-encoder reranking is acceptable",
 			"If a search returns no results or obviously weak results, retry once with a different mode before concluding the KB lacks the answer",
@@ -441,6 +443,9 @@ export default function (pi: ExtensionAPI) {
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
+			path_pattern: Type.Optional(
+				Type.String({ description: "Filter by file path substring (for example src/engine.ts)" }),
+			),
 			diversity: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("balanced"), Type.Literal("strong")])),
 			diagnostics: Type.Optional(
 				Type.Boolean({ description: "Include ranking diagnostics and mode/fallback details in the result" }),
@@ -448,7 +453,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal) {
 			const { engine } = await ensureInitialized();
-			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params as {
+			const { query, mode, limit, kb_id, offset, file_type, path_pattern, diversity, diagnostics } = params as {
 				query: string;
 				mode?:
 					| "auto"
@@ -466,10 +471,11 @@ export default function (pi: ExtensionAPI) {
 				kb_id?: string;
 				offset?: number;
 				file_type?: string;
+				path_pattern?: string;
 				diversity?: "off" | "balanced" | "strong";
 				diagnostics?: boolean;
 			};
-			const filters = file_type ? { file_type } : undefined;
+			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
 			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
 				const details = [
@@ -525,6 +531,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use knowledge_symbol_search before knowledge_search when looking for a function, class, env var, config key, route, or Markdown heading",
 			"Use exact=true when the user provides a precise symbol or key",
+			"This is a lightweight declaration-pattern index, not full LSP; for methods, uncommon syntax, or missing symbols, fallback to knowledge_search mode 'fast' or 'adaptive'",
 			"After finding a symbol, use knowledge_search mode 'adaptive' with the file path or symbol name when surrounding implementation context is needed",
 		],
 		parameters: Type.Object({
@@ -564,7 +571,16 @@ export default function (pi: ExtensionAPI) {
 				},
 				_signal,
 			);
-			if (response.results.length === 0) return { content: [{ type: "text", text: "No symbols found." }] };
+			if (response.results.length === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "No symbols found. This may mean the symbol is absent, symbol metadata is missing/stale, or the lightweight extractor does not cover this syntax. For important lookups, run knowledge_doctor or fallback to knowledge_search mode 'fast'/'adaptive'.",
+						},
+					],
+				};
+			}
 			const lines = response.results.map((result, index) => {
 				const signature = result.signature ? ` — ${result.signature}` : "";
 				return `[${index + 1}] ${result.name} (${result.kind}) ${result.file_path}:${result.start_line}-${result.end_line} [${result.kb_name}]${signature}`;
@@ -584,8 +600,8 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_update",
 		label: "Knowledge Update",
-		description: "Incrementally re-index a knowledge base (only re-embeds changed content)",
-		promptSnippet: "Incrementally update a knowledge base (only changed files re-embedded)",
+		description: "Incrementally re-index a source-backed knowledge base with a retained file, directory, or URL source",
+		promptSnippet: "Refresh an existing source-backed KB",
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to update" }),
 		}),
@@ -724,14 +740,24 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_remove",
 		label: "Knowledge Remove",
-		description: "Remove a knowledge base by name or ID",
+		description: "Remove a knowledge base by name or ID after explicit confirmation",
+		promptGuidelines: [
+			"Destructive: only call after the user explicitly asks to remove knowledge data or confirms a proposed removal",
+			"Prefer knowledge_status or knowledge_doctor before removing data for troubleshooting",
+			"Use knowledge_export before removal if the user may need a backup",
+		],
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to remove" }),
+			confirm: Type.Boolean({
+				description: "Must be true after explicit user confirmation for this destructive operation",
+			}),
 		}),
 		async execute(_id, params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
+			const { target, confirm } = params as { target: string; confirm?: boolean };
+			if (confirm !== true) throw new Error("Confirmation required: pass confirm=true for destructive removal");
 			const { engine } = await ensureInitialized();
-			const ok = engine.remove((params as { target: string }).target);
+			const ok = engine.remove(target);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
 		},
 	});
@@ -777,10 +803,22 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "knowledge_clear",
 		label: "Knowledge Clear",
-		description: "Remove all knowledge bases",
-		parameters: Type.Object({}),
-		async execute(_id, _params, _signal) {
+		description: "Remove all knowledge bases after explicit confirmation",
+		promptGuidelines: [
+			"Destructive: only call after the user explicitly asks to clear all knowledge data or confirms a proposed clear",
+			"Never use knowledge_clear as troubleshooting unless the user explicitly approves",
+			"Prefer knowledge_status, knowledge_doctor, or knowledge_export before clearing data",
+		],
+		parameters: Type.Object({
+			confirm: Type.Boolean({
+				description: "Must be true after explicit user confirmation for this destructive operation",
+			}),
+		}),
+		async execute(_id, params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
+			if ((params as { confirm?: boolean }).confirm !== true) {
+				throw new Error("Confirmation required: pass confirm=true for destructive clear");
+			}
 			const { engine } = await ensureInitialized();
 			engine.clear();
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };

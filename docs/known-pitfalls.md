@@ -145,9 +145,9 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 
 搜尋模式不能完全交給 agent 猜。工具提示、skill、README 與 AGENTS 必須一致說明:
 
-- `hybrid`: 預設模式，適合大多數專案問題。
+- `hybrid`: 預設模式，適合有明確 lexical anchor 的多數專案問題；它不是 vector-only semantic recall，低 keyword evidence 會被 gate 掉。
 - `fast`: 精確 symbol、檔名、指令、錯誤碼、API、config key、quoted string。
-- `semantic`: 概念問題，使用者用語可能和文件/程式碼字面不同。
+- `semantic`: 概念問題，使用者用語可能和文件/程式碼字面不同，或 `hybrid` 沒有 lexical match 但 KB 理論上應該有答案。
 - `adaptive`: 需要鄰近脈絡、相關 section、或準備改 code。
 - `deep`: 高風險答案、top results 模糊、或最後驗證。
 
@@ -156,6 +156,8 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 `auto` mode 是工具層 fallback，不是單純 prompt 建議。它必須回傳實際 `mode_used` 與 `retry_modes`，並避免 exact lookup 查不到後接受零 lexical evidence 的 semantic 假陽性。
 
 `knowledge_symbol_search` 是 exact lookup 的第一層，不是完整 code graph。它應索引 lightweight、可重建的 metadata: function/class/interface/type/variable、Markdown heading、config key、env var。不要為了 symbol lookup 在 root entry 或一般啟動路徑引入 LSP、tree-sitter 或大型 parser；如果需要更完整的 caller/callee graph，應作為後續明確設計，而不是塞進 Pi/OMP 外掛的 startup path。
+
+`knowledge_search` 的 `path_pattern` 是 substring filter，不是 glob/LSP path query。Agent 若需要鎖定檔案或目錄，可以搭配 `file_type` 使用；若需要 code symbol 的 caller/callee 或 rename 語意，這不是此工具的責任。
 
 搜尋 provenance 不能 overclaim。`stale=false` 只代表能取得來源 mtime 時來源沒有比 chunk `indexed_at` 更新，或 KB 本身不是 stale；它不是外部依賴、遠端 URL 或使用者語意正確性的保證。Agent 回答仍應用 file path、line range、match reason 和 diagnostics 判斷證據強度。
 
@@ -219,7 +221,7 @@ Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能�
 - OpenAI-compatible embedding 的 `AbortError` 必須 normalize 成產品層 `Cancelled`，否則 update/import 會把使用者取消誤判成 API failure，進而把原本 ready/stale KB 標成 `error`。
 - model worker 是 embedding 與 reranking 的共享子程序。單一 rerank/search request 被取消時，不應直接 kill worker 並用普通 failure reject 其他 pending embedding requests；否則取消查詢會讓同時進行的 add/update/import 失敗。
 - export 必須先寫 unique temp file，並在最後 rename/publish 前再次檢查 cancellation。最後一次 progress callback 也可能觸發 abort；不能因 loop 已結束就覆蓋使用者既有 output。
-- PDF/DOCX 這類 heavy extraction path 在 add/update 都要共用同一套 extractor，並在讀檔、載入 parser、extract 前後檢查 cancellation。update 不能把已支援的 document source 當 UTF-8 raw text 重新索引。
+- PDF/DOCX 這類 heavy extraction path 在 add/update 都要共用同一套 extractor，並在讀檔、載入 parser、extract 前後檢查 cancellation。單檔與 directory scan 都必須走 extractor；update 不能把已支援的 document source 當 UTF-8 raw text 重新索引，也不能把 directory 裡的 PDF/DOCX 誤列為 binary technical skip。
 - public tool wrapper 即使只是 show/list/symbol lookup，也要在 runtime initialization 前後觀察 AbortSignal。今天查詢很快不代表未來 symbol table 或 DB startup 一定便宜。
 
 

@@ -145,6 +145,14 @@ describe("KnowledgeEngine", () => {
 			);
 		});
 
+		it("rejects missing local path-like sources instead of treating them as inline text", async () => {
+			const missingPath = join(TEST_DIR, "missing-source.md");
+
+			await expect(engine.add(missingPath, "Missing Source")).rejects.toThrow(/missing|does not exist/i);
+
+			expect(engine.list()).toHaveLength(0);
+		});
+
 		it("rejects overlapping adds for the same knowledge base name", async () => {
 			const first = engine.add("Original overlap content about authentication tokens and sessions.", "Overlap Add");
 			const second = engine.add("Replacement overlap content about billing invoices and payments.", "Overlap Add");
@@ -432,6 +440,111 @@ describe("KnowledgeEngine", () => {
 			expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
 			expect((await engine.search("ChangedDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(1);
 			expect((await engine.search("InitialDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(0);
+		});
+
+		it("extracts DOCX files found during directory add and update", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-directory-docx-"));
+			try {
+				const docxPath = join(projectDir, "handbook.docx");
+				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
+				mammothMock.extractRawText
+					.mockResolvedValueOnce({
+						value: "Initial directory DOCX text about DirectoryDocxInitialToken authentication sessions.",
+					})
+					.mockResolvedValueOnce({
+						value: "Changed directory DOCX text about DirectoryDocxChangedToken billing invoices.",
+					});
+
+				const added = await engine.add(projectDir, "Directory Docx");
+				expect(added.kb.file_count).toBe(1);
+				expect(mammothMock.extractRawText).toHaveBeenCalledWith({ path: docxPath });
+				expect(
+					(await engine.search("DirectoryDocxInitialToken", { mode: "fast", kb_id: "Directory Docx" })).total_count,
+				).toBe(1);
+
+				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xfe, 0x00]));
+				const updated = await engine.update("Directory Docx");
+
+				expect(updated.added).toBe(1);
+				expect(updated.removed).toBe(1);
+				expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
+				expect(
+					(await engine.search("DirectoryDocxChangedToken", { mode: "fast", kb_id: "Directory Docx" })).total_count,
+				).toBe(1);
+				expect(
+					(await engine.search("DirectoryDocxInitialToken", { mode: "fast", kb_id: "Directory Docx" })).total_count,
+				).toBe(0);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("skips failed document extraction during directory add without failing the KB", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-directory-docx-add-skip-"));
+			try {
+				const docxPath = join(projectDir, "broken.docx");
+				writeFileSync(join(projectDir, "valid.ts"), "export const ValidAddToken = 'indexed';");
+				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
+				mammothMock.extractRawText.mockRejectedValueOnce(new Error("corrupt document"));
+
+				const added = await engine.add(projectDir, "Directory Docx Add Skip");
+
+				const db = openDatabase(TEST_DIR);
+				const job = getIndexingJob(db, added.kb.id);
+				db.close();
+				expect(added.kb.status).toBe("ready");
+				expect(added.kb.file_count).toBe(1);
+				expect(job?.status).toBe("succeeded");
+				expect(job?.skipped_total).toBe(1);
+				expect(job?.message).toContain("extraction_failed: 1");
+				expect(mammothMock.extractRawText).toHaveBeenCalledWith({ path: docxPath });
+				expect(
+					(await engine.search("ValidAddToken", { mode: "fast", kb_id: "Directory Docx Add Skip" })).total_count,
+				).toBe(1);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("skips failed document extraction during directory update without marking the KB error", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-directory-docx-update-skip-"));
+			try {
+				const docxPath = join(projectDir, "handbook.docx");
+				const validPath = join(projectDir, "valid.ts");
+				writeFileSync(validPath, "export const InitialValidUpdateToken = 'indexed';");
+				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
+				mammothMock.extractRawText.mockResolvedValueOnce({
+					value: "Initial update DOCX text about InitialSkippedDocToken.",
+				});
+
+				const added = await engine.add(projectDir, "Directory Docx Update Skip");
+				writeFileSync(validPath, "export const ChangedValidUpdateToken = 'indexed';");
+				writeFileSync(docxPath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xfe, 0x00]));
+				mammothMock.extractRawText.mockRejectedValueOnce(new Error("corrupt updated document"));
+
+				const updated = await engine.update("Directory Docx Update Skip");
+
+				const db = openDatabase(TEST_DIR);
+				const job = getIndexingJob(db, added.kb.id);
+				db.close();
+				expect(updated.added).toBe(1);
+				expect(updated.removed).toBe(2);
+				expect(engine.list().find((kb) => kb.id === added.kb.id)?.status).toBe("ready");
+				expect(job?.status).toBe("succeeded");
+				expect(job?.skipped_total).toBe(1);
+				expect(job?.message).toContain("extraction_failed: 1");
+				expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
+				expect(
+					(await engine.search("ChangedValidUpdateToken", { mode: "fast", kb_id: "Directory Docx Update Skip" }))
+						.total_count,
+				).toBe(1);
+				expect(
+					(await engine.search("InitialSkippedDocToken", { mode: "fast", kb_id: "Directory Docx Update Skip" }))
+						.total_count,
+				).toBe(0);
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
 		});
 
 		it("reports batched progress while embedding many changed chunks", async () => {

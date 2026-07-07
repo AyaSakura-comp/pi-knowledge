@@ -74,17 +74,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase, signal?: Ab
 		coverage_percent: 100,
 		total_source_files: 0,
 		indexed_files: kb.file_count,
-		skipped_files: {
-			total: 0,
-			by_reason: {
-				suggested_excluded: 0,
-				oversized: 0,
-				binary: 0,
-				unreadable: 0,
-				inaccessible: 0,
-			},
-			samples: [],
-		},
+		skipped_files: createSkippedScanStats(),
 		job,
 	};
 

@@ -10,14 +10,16 @@ import {
 } from "./embedding/provider.ts";
 import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import {
+	addSkippedScanEntry,
 	buildChunkEmbeddingText,
 	chunkFile,
 	chunkIdentityHash,
 	createSkippedScanStats,
 	isReadableTextFile,
+	isSupportedDocumentFile,
 	iterateScannableFiles,
-	iterateScannedFiles,
 	preTokenizeForFTS,
+	type ScannableFile,
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
@@ -659,6 +661,58 @@ async function extractSourceFileContent(filePath: string, signal?: AbortSignal):
 	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
 }
 
+interface ClassifiedSource {
+	resolvedSource: string;
+	isUrl: boolean;
+	isDir: boolean;
+	isFile: boolean;
+	sourceType: "url" | "directory" | "file" | "text";
+}
+
+function looksLikeLocalPath(source: string): boolean {
+	const trimmed = source.trim();
+	if (!trimmed || trimmed.includes("\n") || trimmed.includes("\r")) return false;
+	if (/^(?:https?:)?\/\//.test(trimmed)) return false;
+	if (trimmed.startsWith(".") || trimmed.startsWith("/") || trimmed.startsWith("~")) return true;
+	if (trimmed.includes("/") || trimmed.includes("\\")) return true;
+	return /\.[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/.test(trimmed);
+}
+
+function classifySource(source: string): ClassifiedSource {
+	const resolvedSource = resolve(source);
+	const isUrl = source.startsWith("http://") || source.startsWith("https://");
+	const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
+	const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
+	if (!isUrl && !isDir && !isFile && looksLikeLocalPath(source)) {
+		throw new Error(`Local path does not exist: ${source}. Pass inline text only when the source itself is text.`);
+	}
+	return {
+		resolvedSource,
+		isUrl,
+		isDir,
+		isFile,
+		sourceType: isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text",
+	};
+}
+
+async function extractScannableFileContent(file: ScannableFile, signal?: AbortSignal): Promise<ExtractedSourceFile> {
+	return extractSourceFileContent(file.path, signal);
+}
+
+async function extractScannableFileContentOrSkip(
+	file: ScannableFile,
+	skipped: ReturnType<typeof createSkippedScanStats>,
+	signal?: AbortSignal,
+): Promise<ExtractedSourceFile | undefined> {
+	try {
+		return await extractScannableFileContent(file, signal);
+	} catch (error) {
+		if (signal?.aborted || isCancellationError(error)) throw error;
+		addSkippedScanEntry(skipped, { path: file.relPath, reason: "extraction_failed", size: file.size });
+		return undefined;
+	}
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
 }
@@ -764,11 +818,7 @@ export class KnowledgeEngine {
 
 	plan(source: string, options: AddOptions = {}, signal?: AbortSignal): IndexPlan {
 		throwIfAborted(signal);
-		const resolvedSource = resolve(source);
-		const isUrl = source.startsWith("http://") || source.startsWith("https://");
-		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
-		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
-		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
+		const { resolvedSource, isDir, isFile, sourceType } = classifySource(source);
 		if (isDir) {
 			const plan = planDirectoryScan(resolvedSource, toScanOptions(options), signal);
 			return {
@@ -781,8 +831,7 @@ export class KnowledgeEngine {
 		}
 		if (isFile) {
 			const skipped = createSkippedScanStats();
-			const supportedDocument =
-				resolvedSource.endsWith(".pdf") || resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc");
+			const supportedDocument = isSupportedDocumentFile(resolvedSource);
 			if (!supportedDocument && !isReadableTextFile(resolvedSource)) {
 				skipped.total = 1;
 				skipped.by_reason.binary = 1;
@@ -837,11 +886,7 @@ export class KnowledgeEngine {
 		if (!this.db) throw new Error("Engine not initialized");
 		throwIfAborted(signal);
 		const db = this.db;
-		const resolvedSource = resolve(source);
-		const isUrl = source.startsWith("http://") || source.startsWith("https://");
-		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
-		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
-		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
+		const { resolvedSource, isUrl, isDir, isFile, sourceType } = classifySource(source);
 		const scanOptions = toScanOptions(options);
 
 		const existingKB = getKBByName(db, name);
@@ -872,8 +917,14 @@ export class KnowledgeEngine {
 			const pendingChunks: Awaited<ReturnType<typeof chunkFile>> = [];
 			const startedAt = Date.now();
 			let latestSkippedTotal = 0;
+			let latestSkippedSummary = "none";
 
-			const reportProgress = (phase: string, processedFiles?: number, totalFiles?: number, skippedTotal = 0): void => {
+			const reportProgress = (
+				phase: string,
+				processedFiles?: number,
+				totalFiles?: number,
+				skippedTotal = latestSkippedTotal,
+			): void => {
 				latestSkippedTotal = skippedTotal;
 				const elapsed = Date.now() - startedAt;
 				const chunkRate = chunkCount / Math.max(1, elapsed / 1000);
@@ -966,19 +1017,24 @@ export class KnowledgeEngine {
 				onProgress?.(scanningMessage);
 				const skipped = createSkippedScanStats();
 				let processedFiles = 0;
-				for (const file of iterateScannedFiles(resolvedSource, skipped, scanOptions)) {
+				for (const file of iterateScannableFiles(resolvedSource, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
-					const chunks = await chunkFile(file.content, file.relPath);
+					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+					if (!extracted) {
+						latestSkippedTotal = skipped.total;
+						continue;
+					}
+					const chunks = await chunkFile(extracted.content, file.relPath);
 					processedFiles++;
 					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
-					addSymbols(file.content, file.relPath, file.fileType);
+					addSymbols(extracted.content, file.relPath, extracted.fileType);
 					await addChunks(chunks, processedFiles, plan.files);
 					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
-				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${summarizeSkippedScan(
-					skipped,
-				)}), finalizing...`;
+				latestSkippedTotal = skipped.total;
+				latestSkippedSummary = summarizeSkippedScan(skipped);
+				const finalizingMessage = `Scanned ${processedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), finalizing...`;
 				updateIndexingJob(this.db, kb.id, {
 					phase: "finalizing",
 					message: finalizingMessage,
@@ -1007,9 +1063,11 @@ export class KnowledgeEngine {
 
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after add: ${kb.id}`);
+			const skippedReadySuffix =
+				latestSkippedTotal > 0 ? `, skipped ${latestSkippedTotal} (${latestSkippedSummary})` : "";
 			const readyMessage = `Ready: ${chunkCount} chunks from ${savedFileCount} files in ${formatDuration(
 				Date.now() - startedAt,
-			)}`;
+			)}${skippedReadySuffix}`;
 			updateIndexingJob(this.db, kb.id, {
 				phase: "ready",
 				message: readyMessage,
@@ -1091,6 +1149,8 @@ export class KnowledgeEngine {
 			const vectorPath = this.vectorPathFor(kb.id);
 			addedVectorPath = tempVectorPath(`${vectorPath}.added`);
 			addedVectorWriter = openVectorWriter(addedVectorPath);
+			let latestSkippedTotal = 0;
+			let latestSkippedSummary = "none";
 			const existingHashes = new Map<string, Array<{ id: string; vectorIndex: number }>>();
 			let existingIndex = 0;
 			for (const chunk of iterateChunksByKB(this.db, kb.id)) {
@@ -1202,11 +1262,13 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(planningMessage);
 				const skipped = createSkippedScanStats();
-				for (const file of iterateScannedFiles(kb.source_path, skipped, scanOptions)) {
+				for (const file of iterateScannableFiles(kb.source_path, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
+					const extracted = await extractScannableFileContentOrSkip(file, skipped, signal);
+					if (!extracted) continue;
 					scannedFiles++;
-					stagedSymbols.push(...extractSymbols(file.content, file.relPath, file.fileType));
-					await processChunks(await chunkFile(file.content, file.relPath));
+					stagedSymbols.push(...extractSymbols(extracted.content, file.relPath, extracted.fileType));
+					await processChunks(await chunkFile(extracted.content, file.relPath));
 					if (scannedFiles % 25 === 0) {
 						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
 						updateIndexingJob(this.db, kb.id, {
@@ -1222,9 +1284,9 @@ export class KnowledgeEngine {
 						onProgress?.(message);
 					}
 				}
-				const message = `Scanned ${scannedFiles} files, skipped ${skipped.total} (${summarizeSkippedScan(
-					skipped,
-				)}), reconciling deletes...`;
+				latestSkippedTotal = skipped.total;
+				latestSkippedSummary = summarizeSkippedScan(skipped);
+				const message = `Scanned ${scannedFiles} files, skipped ${skipped.total} (${latestSkippedSummary}), reconciling deletes...`;
 				updateIndexingJob(this.db, kb.id, {
 					phase: "reconciling",
 					message,
@@ -1316,7 +1378,9 @@ export class KnowledgeEngine {
 
 			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
-			const readyMessage = `Ready: +${addedCount} -${idsToRemove.length} =${unchanged}`;
+			const skippedReadySuffix =
+				latestSkippedTotal > 0 ? `, skipped ${latestSkippedTotal} (${latestSkippedSummary})` : "";
+			const readyMessage = `Ready: +${addedCount} -${idsToRemove.length} =${unchanged}${skippedReadySuffix}`;
 			updateIndexingJob(this.db, kb.id, {
 				phase: "ready",
 				message: readyMessage,
