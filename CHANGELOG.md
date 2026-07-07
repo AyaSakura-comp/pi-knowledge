@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0] - 2026-07-07
+
+### Added
+- Added route symbol extraction and exact route lookup support through `knowledge_symbol_search`.
+- Added structured `details` payloads for search diagnostics and doctor actions so agents can consume provenance and remediation codes without parsing text.
+
+### Fixed
+- Deleted vector files when knowledge bases are removed or cleared, including orphan detection in diagnostics.
+- Guarded destructive and long-running operations with stronger mutation and shutdown lifecycle checks.
+- Preserved ready knowledge bases when update cancellation happens before mutation starts, and kept partial update state from polluting symbol search.
+- Propagated cancellation through search, export, import, diagnostics, and external embedding API requests.
+
+### Changed
+- Reworked JSONL import/export around streaming I/O and bounded batches for large portable knowledge bases.
+- Improved watcher exclusions so generated, vendor, and runtime artifacts do not trigger unnecessary scans.
+- Expanded Pi/OMP release coverage with lifecycle, cancellation, watcher, symbol, tool-contract, and model-worker regressions.
+
 ## [0.4.7] - 2026-07-04
 
 ### Fixed
