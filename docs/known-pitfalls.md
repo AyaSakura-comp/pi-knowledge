@@ -68,15 +68,29 @@ Directory KB 的 chunk `file_path` 是相對路徑；single-file KB 的 chunk `f
 
 JSONL export 是分享格式，不是原機器 source manifest。不要把本機 absolute `source_path` 匯出後再匯入成 active source，否則另一台機器會出現不可更新或錯誤 diagnostics。Imported KB 應當視為 portable text source，必要時重新 add 原始資料來源。
 
+Import/export 也必須維持 streaming 語意。不要用 `readFileSync(...).split("\n")` 或 `getChunksByKB().map(...).join("\n")` 重新引入全量 heap 放大；大型 KB 匯入匯出應逐行處理、以 bounded batch embedding/store，並支援 cancellation。
+
+Export 必須寫到同目錄 temporary file，成功完成後才 rename 到使用者指定的 `outputPath`。取消或失敗只能刪 temporary file，不能刪除或截斷使用者既有 export 檔。Export 雖然是讀取操作，也要納入 engine lifecycle guard，避免和 remove/update/shutdown 交錯。
+
+## Remove/clear data deletion contract
+
+`knowledge_remove` 與 `knowledge_clear` 的使用者語意是刪除 KB 衍生資料，不只是刪 SQLite rows。Engine layer 必須在刪 DB row 的同時刪除 `vectors/<kb.id>.bin`，因為 storage layer 不知道 knowledge directory。失敗 cleanup 也要刪除 temp vector 和可能已 rename 的 vector file，避免 private embedding data 殘留在 `~/.pi/knowledge` 或 `~/.omp/knowledge`。
+
 ## File watcher fallback
 
 `fs.watch(dir, { recursive: true })` 在 macOS/Node 環境中仍可能因 `EMFILE: too many open files` 或平台限制失效。`startWatcher` 必須保留 polling fallback；狀態顯示的 active watcher count 應計入 native watcher 或 poller。測試 watcher 時至少等待 `POLL_MS + DEBOUNCE_MS`。
+
+Watcher snapshot 必須套用與 indexing scanner 一致的 suggested exclusions / include / exclude options。否則大型 repo 即使 indexing 排除了 `node_modules`、`.git`、`dist`、runtime cache，watcher 仍會每輪掃完整 tree 或因 ignored file 改動觸發 update。
 
 ## SQLite iterator/update lifecycle
 
 `better-sqlite3` 的 `.iterate()` 會讓 statement lifecycle 跟 JS iterator 消費方式綁在一起。Search、status、doctor 或 vector rebuild 如果中途 break、return、throw，後續同一 connection 的 write 可能遇到 `This database connection is busy executing a query`。Production paths 不應把 live SQLite iterator 傳入可能提前返回的 helper，也不應在 live `chunks` iterator 迴圈內寫 DB。改用 bounded `.all()` 分頁 generator，讓每批 query statement 在 yield 前已完成。
 
 `knowledge_update` 還必須以 KB id 做 in-flight coalescing。Watcher 自動更新、手動 `knowledge_update`、重試與 shutdown 都可能重疊；guard state 必須在任何可 yield 的 work 前建立，dispose 必須等待 active update settle 後再關 DB。
+
+所有 destructive/mutation paths 都要尊重同一個 lifecycle gate。`add`、`import`、`update`、`remove`、`clear` 不可在任一 KB mutation active 時交錯；`dispose()` 開始後必須在任何 await 前設 shutdown state，late tool wrapper 呼叫只能拒絕，不能再拿舊 engine reference 寫 DB 或 vector files。
+
+`knowledge_update` cancellation 不能把原本 ready/stale KB 變成 error，也不能提前刪除可見 symbols。新增 chunks、臨時 vector files、replacement vector files 都必須可回滾；舊 chunks/symbols 只可在 replacement vector 成功建立後的 commit path 替換。
 
 ## Pi virtual modules vs Node import
 
@@ -141,6 +155,10 @@ Contextual Retrieval 不能只靠「把鄰近 chunk 多塞一點」解決。常�
 
 `auto` mode 是工具層 fallback，不是單純 prompt 建議。它必須回傳實際 `mode_used` 與 `retry_modes`，並避免 exact lookup 查不到後接受零 lexical evidence 的 semantic 假陽性。
 
+`knowledge_symbol_search` 是 exact lookup 的第一層，不是完整 code graph。它應索引 lightweight、可重建的 metadata: function/class/interface/type/variable、Markdown heading、config key、env var。不要為了 symbol lookup 在 root entry 或一般啟動路徑引入 LSP、tree-sitter 或大型 parser；如果需要更完整的 caller/callee graph，應作為後續明確設計，而不是塞進 Pi/OMP 外掛的 startup path。
+
+搜尋 provenance 不能 overclaim。`stale=false` 只代表能取得來源 mtime 時來源沒有比 chunk `indexed_at` 更新，或 KB 本身不是 stale；它不是外部依賴、遠端 URL 或使用者語意正確性的保證。Agent 回答仍應用 file path、line range、match reason 和 diagnostics 判斷證據強度。
+
 生成的 `docs/*knowledge-base*report*.md`、`docs/*evaluation-report*.md`、`docs/*eval-report*.md` 類文件預設不索引。這些文件是評估產物，不是來源真相；若被索引，會讓後續評估查到自己的結論。
 
 locale/i18n/translation catalog 只應在查詢明確包含 translation、locale、language、i18n 等意圖時正常競爭排名。一般開發查詢應優先回傳 source、docs 或架構文件，避免 UI 文案檔用高詞頻污染 top results。
@@ -194,6 +212,17 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - `knowledge_doctor` 必須把 status/diagnostics 收斂成 health score 與 concrete actions，避免使用者看見一堆統計但不知道下一步。
 
 
+## Cancellation boundaries must preserve unrelated work
+
+Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能把共享資源或既有 KB 推進失敗狀態。
+
+- OpenAI-compatible embedding 的 `AbortError` 必須 normalize 成產品層 `Cancelled`，否則 update/import 會把使用者取消誤判成 API failure，進而把原本 ready/stale KB 標成 `error`。
+- model worker 是 embedding 與 reranking 的共享子程序。單一 rerank/search request 被取消時，不應直接 kill worker 並用普通 failure reject 其他 pending embedding requests；否則取消查詢會讓同時進行的 add/update/import 失敗。
+- export 必須先寫 unique temp file，並在最後 rename/publish 前再次檢查 cancellation。最後一次 progress callback 也可能觸發 abort；不能因 loop 已結束就覆蓋使用者既有 output。
+- PDF/DOCX 這類 heavy extraction path 在 add/update 都要共用同一套 extractor，並在讀檔、載入 parser、extract 前後檢查 cancellation。update 不能把已支援的 document source 當 UTF-8 raw text 重新索引。
+- public tool wrapper 即使只是 show/list/symbol lookup，也要在 runtime initialization 前後觀察 AbortSignal。今天查詢很快不代表未來 symbol table 或 DB startup 一定便宜。
+
+
 ## onnxruntime exit crash (macOS arm64)
 
 **症狀**: Pi 結束時 `libc++abi: terminating due to uncaught exception of type std::__1::system_error: mutex lock failed: Invalid argument`
@@ -210,6 +239,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - `session_shutdown` 等待 active runs 後以 `SIGKILL` 收掉 model worker，避免 native destructor 在 Pi TUI 主程序 teardown 路徑執行。
 - Embedding/reranker dispose 仍必須是 idempotent。測試或明確 dispose path 可能重複呼叫；必須先清空 pipeline reference 再 await native `dispose()`，避免同一個 ONNX session 被 double-dispose。
 - Pi `session_shutdown` 不應主動 dispose ONNX pipelines。關閉 session 時只清 timers、等待 active runs 完成、關閉 DB/watcher；讓 process exit 接管 native runtime teardown，避免在 Pi shutdown path 觸發 onnxruntime native mutex crash。
+- `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` 目前只啟用 idle coordination timers，不保證立刻釋放 model-worker 內的 native ONNX memory。真正的 worker process shutdown 仍由 engine/session shutdown 控制；若未來要 idle kill worker，必須先有 embedding/reranker 共用的 active-run accounting。
 - 不要在 extension 內提供未完整驗證的 custom TUI renderer。已驗證 tool result/warning 行寬超過 Pi TUI 寬度時會先觸發 `Rendered line ... exceeds terminal width`，接著因 native runtime teardown 出現同一個 `mutex lock failed` 二次崩潰。
 
 **根本修復**: 等 Microsoft 修正 → 升級 onnxruntime。無法從 JS 端解決。

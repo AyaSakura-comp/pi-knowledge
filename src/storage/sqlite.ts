@@ -56,7 +56,26 @@ export interface Chunk {
 
 export type ChunkInsert = Omit<Chunk, "id" | "kb_id" | "indexed_at">;
 
-const SCHEMA_VERSION = 3;
+export interface KnowledgeSymbol {
+	id: string;
+	kb_id: string;
+	name: string;
+	normalized_name: string;
+	kind: "function" | "class" | "interface" | "type" | "variable" | "heading" | "config_key" | "env_var" | "route";
+	file_path: string;
+	file_type: string;
+	start_line: number;
+	end_line: number;
+	container_name: string | null;
+	signature: string | null;
+	text: string;
+	metadata_json: string;
+	indexed_at: number;
+}
+
+export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
+
+const SCHEMA_VERSION = 4;
 const ITERATION_BATCH_SIZE = 500;
 
 const SCHEMA_SQL = `
@@ -116,6 +135,28 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_chunks_kb_id ON chunks(kb_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
+
+CREATE TABLE IF NOT EXISTS symbols (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL DEFAULT 'text',
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  container_name TEXT,
+  signature TEXT,
+  text TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_symbols_kb_name ON symbols(kb_id, normalized_name);
+CREATE INDEX IF NOT EXISTS idx_symbols_kb_kind ON symbols(kb_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   content_tokenized,
@@ -308,6 +349,31 @@ CREATE TABLE IF NOT EXISTS indexing_jobs (
 			}
 			continue;
 		}
+		if (v === 4) {
+			db.exec(`
+CREATE TABLE IF NOT EXISTS symbols (
+  id TEXT PRIMARY KEY,
+  kb_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  normalized_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_type TEXT NOT NULL DEFAULT 'text',
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER NOT NULL DEFAULT 0,
+  container_name TEXT,
+  signature TEXT,
+  text TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  indexed_at INTEGER NOT NULL,
+  FOREIGN KEY (kb_id) REFERENCES knowledge_bases(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_symbols_kb_name ON symbols(kb_id, normalized_name);
+CREATE INDEX IF NOT EXISTS idx_symbols_kb_kind ON symbols(kb_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
+`);
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -358,6 +424,7 @@ export function listKBs(db: Database.Database): KnowledgeBase[] {
 
 export function deleteKB(db: Database.Database, id: string): void {
 	db.prepare("DELETE FROM indexing_jobs WHERE kb_id = ?").run(id);
+	db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM chunks WHERE kb_id = ?").run(id);
 	db.prepare("DELETE FROM knowledge_bases WHERE id = ?").run(id);
 }
@@ -481,7 +548,8 @@ export function getIndexingJob(db: Database.Database, kbId: string): IndexingJob
 
 // --- CRUD: Chunks ---
 
-export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkInsert[]): void {
+export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkInsert[]): string[] {
+	const ids: string[] = [];
 	const stmt = db.prepare(
 		`INSERT INTO chunks (id, kb_id, content_hash, content, content_tokenized, file_path, file_type, start_line, end_line, metadata_json, indexed_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -489,8 +557,10 @@ export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkI
 	const now = Date.now();
 	const insertMany = db.transaction((items: ChunkInsert[]) => {
 		for (const c of items) {
+			const id = randomUUID();
+			ids.push(id);
 			stmt.run(
-				randomUUID(),
+				id,
 				kbId,
 				c.content_hash,
 				c.content,
@@ -505,6 +575,7 @@ export function insertChunks(db: Database.Database, kbId: string, chunks: ChunkI
 		}
 	});
 	insertMany(chunks);
+	return ids;
 }
 
 export function getChunksByKB(db: Database.Database, kbId: string): Chunk[] {
@@ -650,5 +721,159 @@ export function getFileCount(db: Database.Database, kbId: string): number {
 	const row = db.prepare("SELECT COUNT(DISTINCT file_path) as count FROM chunks WHERE kb_id = ?").get(kbId) as {
 		count: number;
 	};
+	return row.count;
+}
+
+// --- CRUD: Symbols ---
+
+function normalizeSymbolName(name: string): string {
+	return name.trim().toLowerCase();
+}
+
+function escapeLike(value: string): string {
+	return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+export function insertSymbols(db: Database.Database, kbId: string, symbols: KnowledgeSymbolInsert[]): void {
+	if (symbols.length === 0) return;
+	const stmt = db.prepare(
+		`INSERT INTO symbols (
+			id, kb_id, name, normalized_name, kind, file_path, file_type, start_line, end_line,
+			container_name, signature, text, metadata_json, indexed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	);
+	const now = Date.now();
+	const insertMany = db.transaction((items: KnowledgeSymbolInsert[]) => {
+		for (const symbol of items) {
+			stmt.run(
+				randomUUID(),
+				kbId,
+				symbol.name,
+				normalizeSymbolName(symbol.name),
+				symbol.kind,
+				symbol.file_path,
+				symbol.file_type,
+				symbol.start_line,
+				symbol.end_line,
+				symbol.container_name ?? null,
+				symbol.signature ?? null,
+				symbol.text,
+				symbol.metadata_json,
+				now,
+			);
+		}
+	});
+	insertMany(symbols);
+}
+
+export function deleteSymbolsByKB(db: Database.Database, kbId: string): void {
+	db.prepare("DELETE FROM symbols WHERE kb_id = ?").run(kbId);
+}
+
+export function deleteSymbolsByFile(db: Database.Database, kbId: string, filePath: string): void {
+	db.prepare("DELETE FROM symbols WHERE kb_id = ? AND file_path = ?").run(kbId, filePath);
+}
+
+export function searchSymbols(
+	db: Database.Database,
+	query: string,
+	options: {
+		kbId?: string;
+		kind?: KnowledgeSymbol["kind"];
+		filePattern?: string;
+		limit?: number;
+		offset?: number;
+		exact?: boolean;
+	} = {},
+): KnowledgeSymbol[] {
+	const clauses: string[] = ["kb.status IN ('ready', 'stale')"];
+	const params: Array<string | number> = [];
+	const normalizedQuery = normalizeSymbolName(query);
+	if (options.kbId) {
+		clauses.push("s.kb_id = ?");
+		params.push(options.kbId);
+	}
+	if (options.kind) {
+		clauses.push("s.kind = ?");
+		params.push(options.kind);
+	}
+	if (options.filePattern) {
+		clauses.push("s.file_path LIKE ? ESCAPE '\\'");
+		params.push(`%${escapeLike(options.filePattern)}%`);
+	}
+	if (normalizedQuery) {
+		if (options.exact) {
+			clauses.push("s.normalized_name = ?");
+			params.push(normalizedQuery);
+		} else {
+			clauses.push(
+				"(s.normalized_name LIKE ? ESCAPE '\\' OR s.file_path LIKE ? ESCAPE '\\' OR s.text LIKE ? ESCAPE '\\')",
+			);
+			const pattern = `%${escapeLike(normalizedQuery)}%`;
+			params.push(pattern, pattern, pattern);
+		}
+	}
+	const where = `WHERE ${clauses.join(" AND ")}`;
+	const limit = Math.max(1, Math.min(200, options.limit ?? 20));
+	const offset = Math.max(0, options.offset ?? 0);
+	return db
+		.prepare(
+			`SELECT s.* FROM symbols s
+			 JOIN knowledge_bases kb ON kb.id = s.kb_id
+			 ${where}
+			 ORDER BY
+			   CASE WHEN s.normalized_name = ? THEN 0 WHEN s.normalized_name LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END,
+			   s.file_path, s.start_line
+			 LIMIT ? OFFSET ?`,
+		)
+		.all(...params, normalizedQuery, `${escapeLike(normalizedQuery)}%`, limit, offset) as KnowledgeSymbol[];
+}
+
+export function countSymbols(
+	db: Database.Database,
+	query: string,
+	options: {
+		kbId?: string;
+		kind?: KnowledgeSymbol["kind"];
+		filePattern?: string;
+		exact?: boolean;
+	} = {},
+): number {
+	const clauses: string[] = ["kb.status IN ('ready', 'stale')"];
+	const params: string[] = [];
+	const normalizedQuery = normalizeSymbolName(query);
+	if (options.kbId) {
+		clauses.push("s.kb_id = ?");
+		params.push(options.kbId);
+	}
+	if (options.kind) {
+		clauses.push("s.kind = ?");
+		params.push(options.kind);
+	}
+	if (options.filePattern) {
+		clauses.push("s.file_path LIKE ? ESCAPE '\\'");
+		params.push(`%${escapeLike(options.filePattern)}%`);
+	}
+	if (normalizedQuery) {
+		if (options.exact) {
+			clauses.push("s.normalized_name = ?");
+			params.push(normalizedQuery);
+		} else {
+			clauses.push(
+				"(s.normalized_name LIKE ? ESCAPE '\\' OR s.file_path LIKE ? ESCAPE '\\' OR s.text LIKE ? ESCAPE '\\')",
+			);
+			const pattern = `%${escapeLike(normalizedQuery)}%`;
+			params.push(pattern, pattern, pattern);
+		}
+	}
+	const where = `WHERE ${clauses.join(" AND ")}`;
+	const row = db
+		.prepare(`SELECT COUNT(*) as count FROM symbols s JOIN knowledge_bases kb ON kb.id = s.kb_id ${where}`)
+		.get(...params) as { count: number };
+	return row.count;
+}
+
+export function getSymbolCount(db: Database.Database, kbId: string): number {
+	const row = db.prepare("SELECT COUNT(*) as count FROM symbols WHERE kb_id = ?").get(kbId) as { count: number };
 	return row.count;
 }

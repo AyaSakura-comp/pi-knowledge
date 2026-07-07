@@ -85,6 +85,32 @@ let initializePromise: Promise<Runtime> | undefined;
 let initialized = false;
 let disposePromise: Promise<void> | undefined;
 
+function scanOptionsFromSourceOptions(raw: string | null | undefined): {
+	includeSuggestedText?: boolean;
+	includePaths?: string[];
+	excludePaths?: string[];
+} {
+	if (!raw) return {};
+	try {
+		const parsed = JSON.parse(raw) as {
+			include_suggested_text?: unknown;
+			include_paths?: unknown;
+			exclude_paths?: unknown;
+		};
+		return {
+			includeSuggestedText: parsed.include_suggested_text === true,
+			includePaths: Array.isArray(parsed.include_paths)
+				? parsed.include_paths.filter((item): item is string => typeof item === "string")
+				: undefined,
+			excludePaths: Array.isArray(parsed.exclude_paths)
+				? parsed.exclude_paths.filter((item): item is string => typeof item === "string")
+				: undefined,
+		};
+	} catch {
+		return {};
+	}
+}
+
 function runtimeModule(modulePath: string): string {
 	return `${modulePath}${RUNTIME_EXTENSION}`;
 }
@@ -161,9 +187,14 @@ export default function (pi: ExtensionAPI) {
 		if (WATCH_ENABLED) {
 			for (const kb of engine.list()) {
 				if (kb.source_path && kb.source_type === "directory") {
-					watcher.startWatcher(kb.id, kb.source_path, (kbId) => {
-						engine.update(kbId).catch(() => {});
-					});
+					watcher.startWatcher(
+						kb.id,
+						kb.source_path,
+						(kbId) => {
+							engine.update(kbId).catch(() => {});
+						},
+						scanOptionsFromSourceOptions(kb.source_options),
+					);
 				}
 			}
 		}
@@ -240,7 +271,7 @@ export default function (pi: ExtensionAPI) {
 				Type.Array(Type.String({ description: "Relative paths under a directory source to exclude from this plan" })),
 			),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal) {
 			const { engine } = await ensureInitialized();
 			const { source, include_suggested_text, include_paths, exclude_paths } = params as {
 				source: string;
@@ -248,15 +279,19 @@ export default function (pi: ExtensionAPI) {
 				include_paths?: unknown;
 				exclude_paths?: unknown;
 			};
-			const plan = engine.plan(source, {
-				include_suggested_text: include_suggested_text === true,
-				include_paths: Array.isArray(include_paths)
-					? include_paths.filter((item) => typeof item === "string")
-					: undefined,
-				exclude_paths: Array.isArray(exclude_paths)
-					? exclude_paths.filter((item) => typeof item === "string")
-					: undefined,
-			});
+			const plan = engine.plan(
+				source,
+				{
+					include_suggested_text: include_suggested_text === true,
+					include_paths: Array.isArray(include_paths)
+						? include_paths.filter((item) => typeof item === "string")
+						: undefined,
+					exclude_paths: Array.isArray(exclude_paths)
+						? exclude_paths.filter((item) => typeof item === "string")
+						: undefined,
+				},
+				_signal,
+			);
 			const samples = plan.skipped.samples
 				.map((sample) => `- ${sample.reason}: ${sample.path}${sample.size ? ` (${sample.size} bytes)` : ""}`)
 				.join("\n");
@@ -342,9 +377,22 @@ export default function (pi: ExtensionAPI) {
 			);
 			// Start watcher for new directory KB
 			if (WATCH_ENABLED && kb.source_path && kb.source_type === "directory") {
-				watcher.startWatcher(kb.id, kb.source_path, (kbId) => {
-					engine.update(kbId).catch(() => {});
-				});
+				watcher.startWatcher(
+					kb.id,
+					kb.source_path,
+					(kbId) => {
+						engine.update(kbId).catch(() => {});
+					},
+					{
+						includeSuggestedText: include_suggested_text === true,
+						includePaths: Array.isArray(include_paths)
+							? include_paths.filter((item): item is string => typeof item === "string")
+							: undefined,
+						excludePaths: Array.isArray(exclude_paths)
+							? exclude_paths.filter((item): item is string => typeof item === "string")
+							: undefined,
+					},
+				);
 			}
 			return {
 				content: [
@@ -382,6 +430,11 @@ export default function (pi: ExtensionAPI) {
 					Type.Literal("hybrid"),
 					Type.Literal("deep"),
 					Type.Literal("adaptive"),
+					Type.Literal("code"),
+					Type.Literal("config"),
+					Type.Literal("docs"),
+					Type.Literal("errors"),
+					Type.Literal("decision"),
 				]),
 			),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
@@ -393,11 +446,22 @@ export default function (pi: ExtensionAPI) {
 				Type.Boolean({ description: "Include ranking diagnostics and mode/fallback details in the result" }),
 			),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal) {
 			const { engine } = await ensureInitialized();
 			const { query, mode, limit, kb_id, offset, file_type, diversity, diagnostics } = params as {
 				query: string;
-				mode?: "auto" | "fast" | "semantic" | "hybrid" | "deep" | "adaptive";
+				mode?:
+					| "auto"
+					| "fast"
+					| "semantic"
+					| "hybrid"
+					| "deep"
+					| "adaptive"
+					| "code"
+					| "config"
+					| "docs"
+					| "errors"
+					| "decision";
 				limit?: number;
 				kb_id?: string;
 				offset?: number;
@@ -406,7 +470,7 @@ export default function (pi: ExtensionAPI) {
 				diagnostics?: boolean;
 			};
 			const filters = file_type ? { file_type } : undefined;
-			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity });
+			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
 				const details = [
 					"No results found.",
@@ -417,7 +481,7 @@ export default function (pi: ExtensionAPI) {
 				]
 					.filter(Boolean)
 					.join("\n");
-				return { content: [{ type: "text", text: details }] };
+				return { content: [{ type: "text", text: details }], details: diagnostics ? response : undefined };
 			}
 			let output = `${response.total_count} results (showing ${response.results.length})`;
 			if (response.mode_used) output += ` — mode: ${response.mode_used}`;
@@ -436,10 +500,84 @@ export default function (pi: ExtensionAPI) {
 									2,
 								)}, source_boost=${r.ranking.source_boost.toFixed(2)}, test=${r.ranking.is_test}`
 							: "";
-					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}`;
+					const provenance =
+						diagnostics && r.provenance
+							? `\nProvenance: chunk=${r.provenance.chunk_id}, hash=${r.provenance.chunk_hash.slice(
+									0,
+									12,
+								)}, reason=${r.provenance.match_reason}, indexed_at=${r.provenance.indexed_at}, source_mtime=${
+									r.provenance.source_mtime ?? "unknown"
+								}, stale=${r.provenance.stale}`
+							: "";
+					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}${provenance}`;
 				})
 				.join("\n\n");
-			return { content: [{ type: "text", text: output }] };
+			return { content: [{ type: "text", text: output }], details: diagnostics ? response : undefined };
+		},
+	});
+
+	pi.registerTool({
+		name: "knowledge_symbol_search",
+		label: "Knowledge Symbol Search",
+		description:
+			"Search indexed code symbols, Markdown headings, config keys, and environment variables exactly or by substring",
+		promptSnippet: "Find exact symbols/config keys/headings before broad semantic search",
+		promptGuidelines: [
+			"Use knowledge_symbol_search before knowledge_search when looking for a function, class, env var, config key, route, or Markdown heading",
+			"Use exact=true when the user provides a precise symbol or key",
+			"After finding a symbol, use knowledge_search mode 'adaptive' with the file path or symbol name when surrounding implementation context is needed",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "Symbol, heading, config key, env var, route, or file text to find" }),
+			kind: Type.Optional(
+				Type.Union([
+					Type.Literal("function"),
+					Type.Literal("class"),
+					Type.Literal("interface"),
+					Type.Literal("type"),
+					Type.Literal("variable"),
+					Type.Literal("heading"),
+					Type.Literal("config_key"),
+					Type.Literal("env_var"),
+					Type.Literal("route"),
+				]),
+			),
+			kb_id: Type.Optional(Type.String({ description: "Limit lookup to a specific KB by ID or exact name" })),
+			file_pattern: Type.Optional(Type.String({ description: "Limit lookup to paths containing this text" })),
+			limit: Type.Optional(Type.Number({ description: "Max results (default 20)" })),
+			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
+			exact: Type.Optional(Type.Boolean({ description: "Require exact normalized symbol/key match" })),
+		}),
+		async execute(_id, params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const { engine } = await ensureInitialized();
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const response = engine.symbolSearch(
+				(params as { query: string }).query,
+				{
+					kind: (params as { kind?: never }).kind,
+					kb_id: (params as { kb_id?: string }).kb_id,
+					file_pattern: (params as { file_pattern?: string }).file_pattern,
+					limit: (params as { limit?: number }).limit,
+					offset: (params as { offset?: number }).offset,
+					exact: (params as { exact?: boolean }).exact === true,
+				},
+				_signal,
+			);
+			if (response.results.length === 0) return { content: [{ type: "text", text: "No symbols found." }] };
+			const lines = response.results.map((result, index) => {
+				const signature = result.signature ? ` — ${result.signature}` : "";
+				return `[${index + 1}] ${result.name} (${result.kind}) ${result.file_path}:${result.start_line}-${result.end_line} [${result.kb_name}]${signature}`;
+			});
+			const suffix = response.has_more ? "\nMore results available; increase offset to continue." : "";
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${response.total_count} symbol result(s):\n\n${lines.join("\n")}${suffix}`,
+					},
+				],
+			};
 		},
 	});
 
@@ -471,11 +609,12 @@ export default function (pi: ExtensionAPI) {
 		label: "Knowledge Status",
 		description: "Show knowledge engine status with health diagnostics: staleness, orphans, and coverage",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_id, _params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine, storage, watcher } = await ensureInitialized();
 			const kbs = engine.list();
 			const watchCount = watcher.getActiveWatcherCount();
-			const diagnostics = engine.diagnose();
+			const diagnostics = engine.diagnose(_signal);
 			const lines = [
 				`Storage: ${storage.getDefaultKnowledgeDir()}`,
 				`Knowledge bases: ${kbs.length}`,
@@ -548,9 +687,10 @@ export default function (pi: ExtensionAPI) {
 		description: "Diagnose knowledge base health, skipped files, stale indexes, stuck jobs, and recommended fixes",
 		promptSnippet: "Diagnose knowledge base health and recommended actions",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_id, _params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine } = await ensureInitialized();
-			const report = engine.doctor();
+			const report = engine.doctor(_signal);
 			const lines = [`Health score: ${report.health_score}/100`, report.summary, ""];
 			if (report.issues.length === 0) {
 				lines.push("No issues found.");
@@ -558,10 +698,10 @@ export default function (pi: ExtensionAPI) {
 				for (const issue of report.issues) {
 					const scope = issue.kb_name ? ` [${issue.kb_name}]` : "";
 					lines.push(`- ${issue.severity.toUpperCase()}${scope}: ${issue.message}`);
-					lines.push(`  Action: ${issue.action}`);
+					lines.push(`  Action (${issue.action_code ?? "none"}): ${issue.action}`);
 				}
 			}
-			return { content: [{ type: "text", text: lines.join("\n") }] };
+			return { content: [{ type: "text", text: lines.join("\n") }], details: report };
 		},
 	});
 
@@ -570,9 +710,11 @@ export default function (pi: ExtensionAPI) {
 		label: "Knowledge Show",
 		description: "List all indexed knowledge bases",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_id, _params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine } = await ensureInitialized();
-			const kbs = engine.list();
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const kbs = engine.list(_signal);
 			if (kbs.length === 0) return { content: [{ type: "text", text: "No knowledge bases." }] };
 			const lines = kbs.map((kb) => `• ${kb.name} — ${kb.chunk_count} chunks, ${kb.file_count} files (${kb.status})`);
 			return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -586,7 +728,8 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to remove" }),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine } = await ensureInitialized();
 			const ok = engine.remove((params as { target: string }).target);
 			return { content: [{ type: "text", text: ok ? "Removed." : "Not found." }] };
@@ -601,10 +744,12 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "KB name or ID to export" }),
 			output: Type.String({ description: "Output file path (.jsonl)" }),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, onUpdate) {
 			const { engine } = await ensureInitialized();
 			const { target, output } = params as { target: string; output: string };
-			const count = await engine.exportKB(target, output);
+			const count = await engine.exportKB(target, output, _signal, (msg) => {
+				onUpdate?.({ content: [{ type: "text", text: msg }] });
+			});
 			return { content: [{ type: "text", text: `Exported ${count} chunks to ${output}` }] };
 		},
 	});
@@ -634,7 +779,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Knowledge Clear",
 		description: "Remove all knowledge bases",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_id, _params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
 			const { engine } = await ensureInitialized();
 			engine.clear();
 			return { content: [{ type: "text", text: "All knowledge bases cleared." }] };

@@ -54,7 +54,11 @@ function scanOptionsFromSourceOptions(raw: string | null): ScanOptions {
 	}
 }
 
-export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): DiagnosticResult {
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("Cancelled");
+}
+
+export function diagnoseKB(db: Database.Database, kb: KnowledgeBase, signal?: AbortSignal): DiagnosticResult {
 	const statusAgeMs = Date.now() - kb.updated_at;
 	const job = getIndexingJob(db, kb.id);
 	const lastProgressAgeMs = job?.status === "running" ? Date.now() - job.last_progress_at : statusAgeMs;
@@ -84,6 +88,8 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 		job,
 	};
 
+	throwIfAborted(signal);
+
 	if (!kb.source_path || kb.source_type === "url" || !existsSync(kb.source_path)) {
 		return result; // text KBs or missing source — no diagnostics possible
 	}
@@ -99,6 +105,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 				skipped,
 				scanOptionsFromSourceOptions(kb.source_options),
 			)) {
+				throwIfAborted(signal);
 				currentFiles.add(file.relPath);
 			}
 			result.skipped_files = skipped;
@@ -106,6 +113,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 			currentFiles.add(kb.source_path);
 		}
 	} catch {
+		if (signal?.aborted) throw new Error("Cancelled");
 		return result;
 	}
 
@@ -115,6 +123,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 	const indexedFilePaths = new Set<string>();
 	const latestIndexedByFile = new Map<string, number>();
 	for (const chunk of iterateChunksByKB(db, kb.id)) {
+		throwIfAborted(signal);
 		indexedFilePaths.add(chunk.file_path);
 		const currentLatest = latestIndexedByFile.get(chunk.file_path) ?? 0;
 		if (chunk.indexed_at > currentLatest) latestIndexedByFile.set(chunk.file_path, chunk.indexed_at);
@@ -122,6 +131,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 
 	// Orphan detection: chunks referencing files no longer in source
 	for (const filePath of indexedFilePaths) {
+		throwIfAborted(signal);
 		if (!currentFiles.has(filePath)) {
 			result.orphan_files.push(filePath);
 		}
@@ -129,6 +139,7 @@ export function diagnoseKB(db: Database.Database, kb: KnowledgeBase): Diagnostic
 
 	// Staleness detection: source files modified after last indexing
 	for (const relPath of currentFiles) {
+		throwIfAborted(signal);
 		const absPath = isDirectory ? join(kb.source_path, relPath) : relPath;
 		try {
 			const mtime = statSync(absPath).mtimeMs;

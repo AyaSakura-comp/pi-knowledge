@@ -1,4 +1,4 @@
-import { existsSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStream } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
@@ -21,6 +21,7 @@ import {
 	type ScanOptions,
 	summarizeSkippedScan,
 } from "./indexer/chunker.ts";
+import { extractSymbols } from "./indexer/symbols.ts";
 import { shutdownModelWorker } from "./model-worker-client.ts";
 import { searchBM25 } from "./search/bm25.ts";
 import { weightedScoreFusion } from "./search/fusion.ts";
@@ -38,31 +39,50 @@ import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/re
 import { searchVectorFile } from "./search/vector.ts";
 import {
 	type Chunk,
+	type ChunkInsert,
+	countSymbols,
 	createKB,
 	deleteChunksByIds,
 	deleteKB,
+	deleteSymbolsByKB,
 	finishIndexingJob,
 	getChunkById,
 	getChunkCount,
 	getChunksByFile,
-	getChunksByKB,
 	getFileCount,
 	getKB,
 	getKBByName,
+	getSymbolCount,
 	insertChunks,
+	insertSymbols,
 	iterateChunkIdsByKB,
 	iterateChunksByKB,
 	type KnowledgeBase,
+	type KnowledgeSymbol,
 	listKBs,
 	openDatabase,
+	searchSymbols,
 	startIndexingJob,
 	updateIndexingJob,
 	updateKBCounts,
 	updateKBStatus,
 } from "./storage/sqlite.ts";
 
+export type SearchMode =
+	| "auto"
+	| "fast"
+	| "semantic"
+	| "hybrid"
+	| "deep"
+	| "adaptive"
+	| "code"
+	| "config"
+	| "docs"
+	| "errors"
+	| "decision";
+
 export interface SearchOptions {
-	mode?: "auto" | "fast" | "semantic" | "hybrid" | "deep" | "adaptive";
+	mode?: SearchMode;
 	limit?: number;
 	offset?: number;
 	kb_id?: string;
@@ -80,6 +100,15 @@ export interface SearchResult {
 	start_line: number;
 	end_line: number;
 	ranking?: RankingDiagnostics;
+	provenance?: {
+		chunk_id: string;
+		chunk_hash: string;
+		indexed_at: number;
+		source_mtime?: number;
+		stale: boolean;
+		match_reason: "bm25" | "vector" | "hybrid" | "rerank" | "symbol" | "adaptive";
+		source_chunk_ids?: string[];
+	};
 }
 
 export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
@@ -89,8 +118,8 @@ export interface SearchResponse {
 	total_count: number;
 	has_more: boolean;
 	warnings?: string[];
-	mode_used?: NonNullable<SearchOptions["mode"]>;
-	retry_modes?: NonNullable<SearchOptions["mode"]>[];
+	mode_used?: SearchMode;
+	retry_modes?: SearchMode[];
 	suggestions?: string[];
 }
 
@@ -113,6 +142,14 @@ interface ImportedChunk {
 	metadata_json?: string;
 }
 
+type KnowledgeSymbolInsert = Parameters<typeof insertSymbols>[2][number];
+
+interface ImportHeader {
+	name: string;
+	description?: string;
+	chunk_count?: number;
+}
+
 interface RankedChunk {
 	chunk: Chunk;
 	kbName: string;
@@ -130,6 +167,14 @@ export interface DoctorIssue {
 	kb_name?: string;
 	message: string;
 	action: string;
+	action_code?:
+		| "run_update"
+		| "rebuild_kb"
+		| "wait_for_indexing"
+		| "review_skipped_scope"
+		| "rebuild_vectors"
+		| "check_source"
+		| "none";
 }
 
 export interface DoctorReport {
@@ -137,6 +182,39 @@ export interface DoctorReport {
 	summary: string;
 	issues: DoctorIssue[];
 	diagnostics: DiagnosticResult[];
+	actions: Array<{
+		code: NonNullable<DoctorIssue["action_code"]>;
+		kb_name?: string;
+		target?: string;
+		description: string;
+	}>;
+}
+
+export interface SymbolSearchOptions {
+	kb_id?: string;
+	kind?: KnowledgeSymbol["kind"];
+	file_pattern?: string;
+	limit?: number;
+	offset?: number;
+	exact?: boolean;
+}
+
+export interface SymbolSearchResponse {
+	results: Array<{
+		name: string;
+		kind: KnowledgeSymbol["kind"];
+		file_path: string;
+		file_type: string;
+		kb_name: string;
+		start_line: number;
+		end_line: number;
+		signature?: string;
+		container_name?: string;
+		text: string;
+		indexed_at: number;
+	}>;
+	total_count: number;
+	has_more: boolean;
 }
 
 const ADAPTIVE_CONTEXT_LINES = 80;
@@ -167,6 +245,23 @@ function isCancellationError(error: unknown): boolean {
 
 function tempVectorPath(vectorPath: string): string {
 	return `${vectorPath}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+}
+
+function retrievalModeFor(
+	mode: SearchMode,
+): Exclude<SearchMode, "auto" | "code" | "config" | "docs" | "errors" | "decision"> {
+	if (mode === "auto") return "hybrid";
+	if (mode === "code" || mode === "config" || mode === "errors") return "fast";
+	if (mode === "docs" || mode === "decision") return "hybrid";
+	return mode;
+}
+
+function matchReasonFor(mode: SearchMode): NonNullable<SearchResult["provenance"]>["match_reason"] {
+	if (mode === "deep") return "rerank";
+	if (mode === "adaptive") return "adaptive";
+	if (mode === "semantic") return "vector";
+	if (mode === "fast" || mode === "code" || mode === "config" || mode === "errors") return "bm25";
+	return "hybrid";
 }
 
 function toScanOptions(options: AddOptions = {}): ScanOptions {
@@ -203,11 +298,12 @@ function parseAddOptions(raw: string | null): AddOptions {
 	}
 }
 
-function planDirectoryScan(dirPath: string, options: ScanOptions = {}): DirectoryScanPlan {
+function planDirectoryScan(dirPath: string, options: ScanOptions = {}, signal?: AbortSignal): DirectoryScanPlan {
 	const skipped = createSkippedScanStats();
 	let files = 0;
 	let bytes = 0;
 	for (const file of iterateScannableFiles(dirPath, skipped, options)) {
+		throwIfAborted(signal);
 		files++;
 		bytes += file.size;
 	}
@@ -218,6 +314,23 @@ function planDirectoryScan(dirPath: string, options: ScanOptions = {}): Director
 		skippedSummary: summarizeSkippedScan(skipped),
 		skipped,
 	};
+}
+
+function sourceMtimeFor(kb: KnowledgeBase | undefined, filePath: string): number | undefined {
+	if (!kb?.source_path) return undefined;
+	const absPath = kb.source_type === "directory" ? join(kb.source_path, filePath) : kb.source_path;
+	try {
+		return statSync(absPath).mtimeMs;
+	} catch {
+		return undefined;
+	}
+}
+
+function kbTrustMultiplier(kb: KnowledgeBase): number {
+	let multiplier = kb.status === "stale" ? 0.92 : 1;
+	if (kb.source_type === "directory" || kb.source_type === "file") multiplier *= 1.04;
+	if (kb.source_type === "text" || kb.source_type === "url") multiplier *= 0.98;
+	return multiplier;
 }
 
 function formatBytes(bytes: number): string {
@@ -452,7 +565,7 @@ function isExactLookupQuery(query: string): boolean {
 	return false;
 }
 
-function chooseAutoMode(query: string): NonNullable<SearchOptions["mode"]> {
+function chooseAutoMode(query: string): SearchMode {
 	const normalized = query.trim();
 	if (isExactLookupQuery(normalized)) return "fast";
 	const wordCount = normalized.split(/\s+/).filter(Boolean).length;
@@ -462,7 +575,7 @@ function chooseAutoMode(query: string): NonNullable<SearchOptions["mode"]> {
 	return "hybrid";
 }
 
-function fallbackModesFor(mode: NonNullable<SearchOptions["mode"]>): NonNullable<SearchOptions["mode"]>[] {
+function fallbackModesFor(mode: SearchMode): SearchMode[] {
 	if (mode === "fast") return ["hybrid", "semantic"];
 	if (mode === "semantic") return ["hybrid", "adaptive"];
 	if (mode === "adaptive") return ["hybrid", "deep"];
@@ -473,8 +586,8 @@ function fallbackModesFor(mode: NonNullable<SearchOptions["mode"]>): NonNullable
 function isWeakAutoResponse(
 	query: string,
 	response: SearchResponse,
-	primaryMode: NonNullable<SearchOptions["mode"]>,
-	attemptMode: NonNullable<SearchOptions["mode"]>,
+	primaryMode: SearchMode,
+	attemptMode: SearchMode,
 ): boolean {
 	if (response.results.length === 0) return true;
 	if (primaryMode === "fast") {
@@ -512,24 +625,152 @@ function normalizeExtractedText(text: string | string[]): string {
 	return Array.isArray(text) ? text.join("\n\n") : text;
 }
 
+interface ExtractedSourceFile {
+	content: string;
+	fileType: string;
+}
+
+async function extractSourceFileContent(filePath: string, signal?: AbortSignal): Promise<ExtractedSourceFile> {
+	const lowerPath = filePath.toLowerCase();
+	if (lowerPath.endsWith(".pdf")) {
+		throwIfAborted(signal);
+		// PDF extraction is an optional heavy runtime path; keep parser loading out of extension startup.
+		const { extractText } = await import("unpdf");
+		throwIfAborted(signal);
+		const buf = readFileSync(filePath);
+		throwIfAborted(signal);
+		const { text } = await extractText(new Uint8Array(buf));
+		throwIfAborted(signal);
+		return { content: normalizeExtractedText(text), fileType: "pdf" };
+	}
+	if (lowerPath.endsWith(".docx") || lowerPath.endsWith(".doc")) {
+		throwIfAborted(signal);
+		// DOCX extraction is an optional heavy runtime path; keep parser loading out of extension startup.
+		const mammoth = await import("mammoth");
+		throwIfAborted(signal);
+		const result = await mammoth.extractRawText({ path: filePath });
+		throwIfAborted(signal);
+		return { content: result.value, fileType: "docx" };
+	}
+	if (!isReadableTextFile(filePath)) {
+		throw new Error(`File is not readable text and has no supported extractor: ${filePath}`);
+	}
+	throwIfAborted(signal);
+	return { content: readFileSync(filePath, "utf-8"), fileType: "text" };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+	if (signal?.aborted) throw new Error("Cancelled");
+}
+
+function importedChunkToInsert(chunk: ImportedChunk): ChunkInsert {
+	const metadataJson = chunk.metadata_json || "{}";
+	return {
+		content_hash: chunkIdentityHash({
+			content: chunk.content,
+			filePath: chunk.file_path,
+			fileType: chunk.file_type,
+			startLine: chunk.start_line,
+			endLine: chunk.end_line,
+			metadataJson,
+		}),
+		content: chunk.content,
+		content_tokenized: "",
+		file_path: chunk.file_path,
+		file_type: chunk.file_type,
+		start_line: chunk.start_line,
+		end_line: chunk.end_line,
+		metadata_json: metadataJson,
+	};
+}
+
+async function writeLine(stream: WriteStream, line: string): Promise<void> {
+	if (stream.write(`${line}\n`)) return;
+	await new Promise<void>((resolve, reject) => {
+		const cleanup = (): void => {
+			stream.off("drain", onDrain);
+			stream.off("error", onError);
+		};
+		const onDrain = (): void => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error): void => {
+			cleanup();
+			reject(error);
+		};
+		stream.once("drain", onDrain);
+		stream.once("error", onError);
+	});
+}
+
+async function finishWriteStream(stream: WriteStream): Promise<void> {
+	await new Promise<void>((resolve, reject) => {
+		const cleanup = (): void => {
+			stream.off("finish", onFinish);
+			stream.off("error", onError);
+		};
+		const onFinish = (): void => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error): void => {
+			cleanup();
+			reject(error);
+		};
+		stream.once("finish", onFinish);
+		stream.once("error", onError);
+		stream.end();
+	});
+}
+
 export class KnowledgeEngine {
 	private db: Database.Database | null = null;
 	private knowledgeDir: string = "";
 	private activeUpdates = new Map<string, Promise<{ added: number; removed: number; unchanged: number }>>();
+	private activeMutations = new Map<string, Promise<unknown>>();
+	private disposing = false;
+
+	private runExclusive<T>(keys: string | string[], description: string, operation: () => Promise<T> | T): Promise<T> {
+		if (this.disposing) throw new Error("Knowledge engine is shutting down");
+		const mutationKeys = Array.isArray(keys) ? keys : [keys];
+		for (const key of mutationKeys) {
+			if (this.activeMutations.has(key)) throw new Error(`${description} is already running`);
+		}
+		const run = Promise.resolve()
+			.then(operation)
+			.finally(() => {
+				for (const key of mutationKeys) {
+					if (this.activeMutations.get(key) === run) this.activeMutations.delete(key);
+				}
+			});
+		for (const key of mutationKeys) this.activeMutations.set(key, run);
+		return run;
+	}
 
 	async initialize(knowledgeDir: string): Promise<void> {
 		this.knowledgeDir = knowledgeDir;
 		this.db = openDatabase(knowledgeDir);
+		this.disposing = false;
 	}
 
-	plan(source: string, options: AddOptions = {}): IndexPlan {
+	private vectorPathFor(kbId: string): string {
+		return join(this.knowledgeDir, "vectors", `${kbId}.bin`);
+	}
+
+	private deleteVectorFile(kbId: string): void {
+		rmSync(this.vectorPathFor(kbId), { force: true });
+	}
+
+	plan(source: string, options: AddOptions = {}, signal?: AbortSignal): IndexPlan {
+		throwIfAborted(signal);
 		const resolvedSource = resolve(source);
 		const isUrl = source.startsWith("http://") || source.startsWith("https://");
 		const isDir = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isDirectory();
 		const isFile = !isUrl && existsSync(resolvedSource) && statSync(resolvedSource).isFile();
 		const sourceType = isUrl ? "url" : isDir ? "directory" : isFile ? "file" : "text";
 		if (isDir) {
-			const plan = planDirectoryScan(resolvedSource, toScanOptions(options));
+			const plan = planDirectoryScan(resolvedSource, toScanOptions(options), signal);
 			return {
 				source_type: "directory",
 				scannable_files: plan.files,
@@ -580,7 +821,21 @@ export class KnowledgeEngine {
 		signal?: AbortSignal,
 		options: AddOptions = {},
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+		throwIfAborted(signal);
+		return this.runExclusive(["global:mutation", `kb-name:${name}`], `Mutation for "${name}"`, () =>
+			this.addUnlocked(source, name, onProgress, signal, options),
+		);
+	}
+
+	private async addUnlocked(
+		source: string,
+		name: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+		options: AddOptions = {},
+	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
+		throwIfAborted(signal);
 		const db = this.db;
 		const resolvedSource = resolve(source);
 		const isUrl = source.startsWith("http://") || source.startsWith("https://");
@@ -608,7 +863,7 @@ export class KnowledgeEngine {
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
 		try {
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			const vectorPath = this.vectorPathFor(kb.id);
 			tempVectorFile = tempVectorPath(vectorPath);
 			const writer = openVectorWriter(tempVectorFile);
 			vectorWriter = writer;
@@ -672,6 +927,9 @@ export class KnowledgeEngine {
 					await flushPending(processedFiles, totalFiles);
 				}
 			};
+			const addSymbols = (content: string, filePath: string, fileType: string): void => {
+				insertSymbols(db, kb.id, extractSymbols(content, filePath, fileType));
+			};
 
 			if (isUrl) {
 				const message = `Fetching ${source}...`;
@@ -679,24 +937,15 @@ export class KnowledgeEngine {
 				onProgress?.(message);
 				const chunks = await chunkUrl(source, signal);
 				fileCount = 1;
+				addSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), source, "html");
 				await addChunks(chunks);
-			} else if (isFile && resolvedSource.endsWith(".pdf")) {
-				updateIndexingJob(this.db, kb.id, { phase: "extracting", message: "Extracting text from PDF..." });
-				onProgress?.("Extracting text from PDF...");
-				const { extractText } = await import("unpdf");
-				const buf = (await import("node:fs")).readFileSync(resolvedSource);
-				const { text } = await extractText(new Uint8Array(buf));
+			} else if (isFile) {
+				const extracted = await extractSourceFileContent(resolvedSource, signal);
 				fileCount = 1;
-				await addChunks(await chunkFile(normalizeExtractedText(text), resolvedSource));
-			} else if (isFile && (resolvedSource.endsWith(".docx") || resolvedSource.endsWith(".doc"))) {
-				updateIndexingJob(this.db, kb.id, { phase: "extracting", message: "Extracting text from DOCX..." });
-				onProgress?.("Extracting text from DOCX...");
-				const mammoth = await import("mammoth");
-				const result = await mammoth.extractRawText({ path: resolvedSource });
-				fileCount = 1;
-				await addChunks(await chunkFile(result.value, resolvedSource));
+				addSymbols(extracted.content, resolvedSource, extracted.fileType);
+				await addChunks(await chunkFile(extracted.content, resolvedSource));
 			} else if (isDir) {
-				const plan = planDirectoryScan(resolvedSource, scanOptions);
+				const plan = planDirectoryScan(resolvedSource, scanOptions, signal);
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
 				)} scannable text, skipped ${plan.skippedTotal} (${plan.skippedSummary})`;
@@ -723,6 +972,7 @@ export class KnowledgeEngine {
 					processedFiles++;
 					latestSkippedTotal = skipped.total;
 					if (chunks.length > 0) fileCount++;
+					addSymbols(file.content, file.relPath, file.fileType);
 					await addChunks(chunks, processedFiles, plan.files);
 					if (processedFiles % 25 === 0) reportProgress("Chunking", processedFiles, plan.files, skipped.total);
 				}
@@ -739,16 +989,9 @@ export class KnowledgeEngine {
 					added_chunks: chunkCount,
 				});
 				onProgress?.(finalizingMessage);
-			} else if (isFile) {
-				if (!isReadableTextFile(resolvedSource)) {
-					throw new Error(`File is not readable text and has no supported extractor: ${resolvedSource}`);
-				}
-				const { readFileSync } = await import("node:fs");
-				const content = readFileSync(resolvedSource, "utf-8");
-				fileCount = 1;
-				await addChunks(await chunkFile(content, resolvedSource));
 			} else {
 				fileCount = 1;
+				addSymbols(source, "inline-text", "text");
 				await addChunks(await chunkFile(source, "inline-text"));
 			}
 
@@ -789,9 +1032,9 @@ export class KnowledgeEngine {
 					isCancellationError(e) ? "Indexing cancelled." : "Indexing failed.",
 					e instanceof Error ? e.message : String(e),
 				);
+				deleteKB(this.db, kb.id);
+				this.deleteVectorFile(kb.id);
 			}
-			// Clean up partial state on failure
-			deleteKB(this.db, kb.id);
 			throw e;
 		}
 	}
@@ -802,6 +1045,8 @@ export class KnowledgeEngine {
 		signal?: AbortSignal,
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
+		if (this.disposing) throw new Error("Knowledge engine is shutting down");
+		throwIfAborted(signal);
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
 		if (!kb.source_path || (kb.source_type !== "url" && !existsSync(kb.source_path))) {
@@ -815,7 +1060,11 @@ export class KnowledgeEngine {
 			return activeUpdate;
 		}
 
-		const updateRun = this.runUpdate(updateableKB, onProgress, signal).finally(() => {
+		const updateRun = this.runExclusive(
+			["global:mutation", `kb:${updateableKB.id}`],
+			`Mutation for "${updateableKB.name}"`,
+			() => this.runUpdate(updateableKB, onProgress, signal),
+		).finally(() => {
 			if (this.activeUpdates.get(updateableKB.id) === updateRun) this.activeUpdates.delete(updateableKB.id);
 		});
 		this.activeUpdates.set(updateableKB.id, updateRun);
@@ -828,15 +1077,18 @@ export class KnowledgeEngine {
 		signal?: AbortSignal,
 	): Promise<{ added: number; removed: number; unchanged: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
+		throwIfAborted(signal);
 		updateKBStatus(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
+		const insertedChunkIds: string[] = [];
+		const stagedSymbols: KnowledgeSymbolInsert[] = [];
 
 		try {
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			const vectorPath = this.vectorPathFor(kb.id);
 			addedVectorPath = tempVectorPath(`${vectorPath}.added`);
 			addedVectorWriter = openVectorWriter(addedVectorPath);
 			const existingHashes = new Map<string, Array<{ id: string; vectorIndex: number }>>();
@@ -889,7 +1141,7 @@ export class KnowledgeEngine {
 					newVectorIndexByHash.set(batch[i].content_hash, indexes);
 				}
 				addedVectorCount += newVectors.length;
-				insertChunks(this.db, kb.id, batch);
+				insertedChunkIds.push(...insertChunks(this.db, kb.id, batch));
 				addedCount += batch.length;
 				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
 				const storedMessage = `Stored update batch: +${addedCount} chunks, =${unchanged} unchanged`;
@@ -931,9 +1183,13 @@ export class KnowledgeEngine {
 				updateIndexingJob(this.db, kb.id, { phase: "fetching", message });
 				onProgress?.(message);
 				scannedFiles = 1;
-				await processChunks(await chunkUrl(kb.source_path, signal));
+				const chunks = await chunkUrl(kb.source_path, signal);
+				stagedSymbols.push(
+					...extractSymbols(chunks.map((chunk) => chunk.content).join("\n\n"), kb.source_path, "html"),
+				);
+				await processChunks(chunks);
 			} else if (statSync(kb.source_path).isDirectory()) {
-				const plan = planDirectoryScan(kb.source_path, scanOptions);
+				const plan = planDirectoryScan(kb.source_path, scanOptions, signal);
 				plannedTotalFiles = plan.files;
 				const planningMessage = `Planned directory scan: ${plan.files} files, ${formatBytes(
 					plan.bytes,
@@ -949,6 +1205,7 @@ export class KnowledgeEngine {
 				for (const file of iterateScannedFiles(kb.source_path, skipped, scanOptions)) {
 					if (signal?.aborted) throw new Error("Cancelled");
 					scannedFiles++;
+					stagedSymbols.push(...extractSymbols(file.content, file.relPath, file.fileType));
 					await processChunks(await chunkFile(file.content, file.relPath));
 					if (scannedFiles % 25 === 0) {
 						const message = `Scanned ${scannedFiles} files, ${scannedChunks} chunks, skipped ${skipped.total}, +${addedCount} =${unchanged}`;
@@ -980,9 +1237,10 @@ export class KnowledgeEngine {
 				});
 				onProgress?.(message);
 			} else {
-				const { readFileSync } = await import("node:fs");
+				const extracted = await extractSourceFileContent(kb.source_path, signal);
 				scannedFiles = 1;
-				await processChunks(await chunkFile(readFileSync(kb.source_path, "utf-8"), kb.source_path));
+				stagedSymbols.push(...extractSymbols(extracted.content, kb.source_path, extracted.fileType));
+				await processChunks(await chunkFile(extracted.content, kb.source_path));
 			}
 			await flushPending();
 			addedVectorWriter.close();
@@ -992,7 +1250,7 @@ export class KnowledgeEngine {
 			for (const entries of existingHashes.values()) {
 				idsToRemove.push(...entries.map((entry) => entry.id));
 			}
-			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
+			const idsToRemoveSet = new Set(idsToRemove);
 			const changesMessage = `Changes: +${addedCount} -${idsToRemove.length} =${unchanged}`;
 			updateIndexingJob(this.db, kb.id, {
 				phase: "reconciling",
@@ -1016,6 +1274,8 @@ export class KnowledgeEngine {
 			};
 			try {
 				for (const chunk of iterateChunksByKB(this.db, kb.id)) {
+					if (signal?.aborted) throw new Error("Cancelled");
+					if (idsToRemoveSet.has(chunk.id)) continue;
 					const oldVectorIndex = takeVectorIndex(oldVectorIndexByHash, chunk.content_hash);
 					const newVectorIndex = takeVectorIndex(newVectorIndexByHash, chunk.content_hash);
 					const vector =
@@ -1050,6 +1310,9 @@ export class KnowledgeEngine {
 			replacementVectorPath = undefined;
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
 			addedVectorPath = undefined;
+			if (idsToRemove.length > 0) deleteChunksByIds(this.db, idsToRemove);
+			deleteSymbolsByKB(this.db, kb.id);
+			insertSymbols(this.db, kb.id, stagedSymbols);
 
 			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
@@ -1071,7 +1334,11 @@ export class KnowledgeEngine {
 			addedVectorWriter?.close();
 			if (replacementVectorPath) rmSync(replacementVectorPath, { force: true });
 			if (addedVectorPath) rmSync(addedVectorPath, { force: true });
-			updateKBStatus(this.db, kb.id, "error");
+			if (insertedChunkIds.length > 0) {
+				deleteChunksByIds(this.db, insertedChunkIds);
+				updateKBCounts(this.db, kb.id, getChunkCount(this.db, kb.id), getFileCount(this.db, kb.id));
+			}
+			updateKBStatus(this.db, kb.id, isCancellationError(e) ? kb.status : "error");
 			finishIndexingJob(
 				this.db,
 				kb.id,
@@ -1083,18 +1350,20 @@ export class KnowledgeEngine {
 		}
 	}
 
-	async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
+	async search(query: string, options: SearchOptions = {}, signal?: AbortSignal): Promise<SearchResponse> {
 		if (!this.db) throw new Error("Engine not initialized");
-		const requestedMode = options.mode ?? "hybrid";
+		throwIfAborted(signal);
+		const requestedMode: SearchMode = options.mode ?? "hybrid";
 		if (requestedMode === "auto") {
 			const primaryMode = chooseAutoMode(query);
 			const attempts = [primaryMode, ...fallbackModesFor(primaryMode)];
-			const tried: NonNullable<SearchOptions["mode"]>[] = [];
+			const tried: SearchMode[] = [];
 			const warnings: string[] = [];
 			for (const mode of attempts) {
 				if (tried.includes(mode)) continue;
 				tried.push(mode);
-				const response = await this.search(query, { ...options, mode });
+				throwIfAborted(signal);
+				const response = await this.search(query, { ...options, mode }, signal);
 				if (response.warnings) warnings.push(...response.warnings);
 				if (!isWeakAutoResponse(query, response, primaryMode, mode)) {
 					return {
@@ -1121,7 +1390,8 @@ export class KnowledgeEngine {
 		}
 		const db = this.db;
 		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters, diversity = "balanced" } = options;
-		const retrievalMode = mode === "adaptive" ? "hybrid" : mode;
+		const resolvedMode = retrievalModeFor(mode);
+		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
 		const candidateLimit = Math.max(50, offset + limit * 12);
 		const normalizedQuery = normalizedQueryText(query);
 		const queryTokens = tokenizeForSimilarity(query);
@@ -1131,6 +1401,7 @@ export class KnowledgeEngine {
 		const selectedKB = kb_id ? (getKB(db, kb_id) ?? getKBByName(db, kb_id)) : undefined;
 		const availableKBs = kb_id ? ([selectedKB].filter(Boolean) as KnowledgeBase[]) : listKBs(db);
 		const kbs = availableKBs.filter((kb) => kb.status === "ready" || kb.status === "stale");
+		const kbById = new Map(kbs.map((kb) => [kb.id, kb]));
 		for (const kb of availableKBs) {
 			if (kb.status !== "ready" && kb.status !== "stale") {
 				warnings.push(`"${kb.name}" is ${kb.status}; search skipped until indexing is ready`);
@@ -1150,20 +1421,37 @@ export class KnowledgeEngine {
 		const vectorsByChunkId = new Map<string, Float32Array>();
 
 		for (const kb of kbs) {
+			throwIfAborted(signal);
 			if (kb.embedding_model !== CURRENT_EMBEDDING_MODEL) {
 				warnings.push(
 					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`,
 				);
 			}
 			if (kb.chunk_count === 0) continue;
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
+			const vectorPath = this.vectorPathFor(kb.id);
 
 			if (retrievalMode === "fast") {
-				allResults.push(...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id, { allowOrFallback: false }));
+				allResults.push(
+					...searchBM25(db, normalizedQuery || query, candidateLimit, kb.id, { allowOrFallback: false }).map(
+						(result) => ({
+							...result,
+							score: result.score * kbTrustMultiplier(kb),
+						}),
+					),
+				);
 			} else if (retrievalMode === "semantic") {
-				const queryVec = await embedQuery(query);
-				const vectorResults = searchVectorFile(queryVec, vectorPath, iterateChunkIdsByKB(db, kb.id), candidateLimit);
-				allResults.push(...vectorResults.results);
+				const queryVec = await embedQuery(query, signal);
+				throwIfAborted(signal);
+				const vectorResults = searchVectorFile(
+					queryVec,
+					vectorPath,
+					iterateChunkIdsByKB(db, kb.id),
+					candidateLimit,
+					signal,
+				);
+				allResults.push(
+					...vectorResults.results.map((result) => ({ ...result, score: result.score * kbTrustMultiplier(kb) })),
+				);
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
 				// hybrid: BM25 + vector weighted fusion (both scoped to this KB)
@@ -1171,12 +1459,19 @@ export class KnowledgeEngine {
 				if (bm25Results.length === 0) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
-				const queryVec = await embedQuery(query);
-				const vectorResults = searchVectorFile(queryVec, vectorPath, iterateChunkIdsByKB(db, kb.id), candidateLimit);
+				const queryVec = await embedQuery(query, signal);
+				throwIfAborted(signal);
+				const vectorResults = searchVectorFile(
+					queryVec,
+					vectorPath,
+					iterateChunkIdsByKB(db, kb.id),
+					candidateLimit,
+					signal,
+				);
 				vecResults = vectorResults.results;
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 				const fused = weightedScoreFusion(bm25Results, vecResults);
-				allResults.push(...fused);
+				allResults.push(...fused.map((result) => ({ ...result, score: result.score * kbTrustMultiplier(kb) })));
 			}
 		}
 
@@ -1189,6 +1484,7 @@ export class KnowledgeEngine {
 		});
 		const rankingByChunkId = new Map<string, RankingDiagnostics>();
 		for (const result of unique) {
+			throwIfAborted(signal);
 			const chunk = getChunkById(db, result.chunkId);
 			if (chunk) {
 				const ranking = scoreChunkForQuery(result.score, chunk, queryTokens);
@@ -1232,9 +1528,11 @@ export class KnowledgeEngine {
 					return chunk ? { chunkId: r.chunkId, content: chunk.content } : null;
 				})
 				.filter(Boolean) as Array<{ chunkId: string; content: string }>;
-			const reranked = await rerank(query, candidates, Math.max(limit * 3, limit));
+			const reranked = await rerank(query, candidates, Math.max(limit * 3, limit), signal);
+			throwIfAborted(signal);
 			const ranked: RankedChunk[] = [];
 			for (const r of reranked) {
+				throwIfAborted(signal);
 				const chunk = getChunkById(db, r.chunkId);
 				if (!chunk) continue;
 				const kbObj = getKB(db, chunk.kb_id);
@@ -1252,17 +1550,30 @@ export class KnowledgeEngine {
 			}
 			const diversified = interleaveByFile(diversifyRankedChunks(ranked, diversity, vectorsByChunkId), diversity);
 			const page = diversified.slice(offset, offset + limit);
-			const results = page.map((r) => ({
-				content: r.content,
-				file_path: r.chunk.file_path,
-				file_type: r.chunk.file_type,
-				kb_name: r.kbName,
-				score: r.score,
-				ranking: r.ranking,
-				snippet: r.snippet,
-				start_line: r.startLine,
-				end_line: r.endLine,
-			}));
+			const results = page.map((r) => {
+				const kb = kbById.get(r.chunk.kb_id);
+				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				return {
+					content: r.content,
+					file_path: r.chunk.file_path,
+					file_type: r.chunk.file_type,
+					kb_name: r.kbName,
+					score: r.score,
+					ranking: r.ranking,
+					snippet: r.snippet,
+					start_line: r.startLine,
+					end_line: r.endLine,
+					provenance: {
+						chunk_id: r.chunk.id,
+						chunk_hash: r.chunk.content_hash,
+						indexed_at: r.chunk.indexed_at,
+						source_mtime: sourceMtime,
+						stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
+						match_reason: matchReasonFor(mode),
+						source_chunk_ids: r.sourceChunkIds,
+					},
+				};
+			});
 			return {
 				results,
 				total_count: diversified.length,
@@ -1274,6 +1585,7 @@ export class KnowledgeEngine {
 
 		const ranked: RankedChunk[] = [];
 		for (const r of filtered) {
+			throwIfAborted(signal);
 			const chunk = getChunkById(db, r.chunkId);
 			if (!chunk) continue;
 			const kb = getKB(db, chunk.kb_id);
@@ -1326,6 +1638,19 @@ export class KnowledgeEngine {
 			snippet: r.snippet,
 			start_line: r.startLine,
 			end_line: r.endLine,
+			provenance: (() => {
+				const kb = kbById.get(r.chunk.kb_id);
+				const sourceMtime = sourceMtimeFor(kb, r.chunk.file_path);
+				return {
+					chunk_id: r.chunk.id,
+					chunk_hash: r.chunk.content_hash,
+					indexed_at: r.chunk.indexed_at,
+					source_mtime: sourceMtime,
+					stale: sourceMtime !== undefined ? sourceMtime > r.chunk.indexed_at : kb?.status === "stale",
+					match_reason: matchReasonFor(mode),
+					source_chunk_ids: r.sourceChunkIds,
+				};
+			})(),
 		}));
 
 		return {
@@ -1346,30 +1671,89 @@ export class KnowledgeEngine {
 
 	remove(nameOrId: string): boolean {
 		if (!this.db) return false;
+		if (this.disposing) throw new Error("Knowledge engine is shutting down");
+		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) return false;
 		deleteKB(this.db, kb.id);
+		this.deleteVectorFile(kb.id);
 		return true;
 	}
 
-	list(): KnowledgeBase[] {
+	list(signal?: AbortSignal): KnowledgeBase[] {
 		if (!this.db) return [];
+		throwIfAborted(signal);
 		return listKBs(this.db);
 	}
 
 	clear(): void {
 		if (!this.db) return;
-		for (const kb of listKBs(this.db)) deleteKB(this.db, kb.id);
+		if (this.disposing) throw new Error("Knowledge engine is shutting down");
+		if (this.activeMutations.size > 0) throw new Error("A knowledge-base mutation is already running");
+		for (const kb of listKBs(this.db)) {
+			deleteKB(this.db, kb.id);
+			this.deleteVectorFile(kb.id);
+		}
 	}
 
-	diagnose(): DiagnosticResult[] {
+	diagnose(signal?: AbortSignal): DiagnosticResult[] {
 		if (!this.db) return [];
+		throwIfAborted(signal);
 		const db = this.db;
-		return listKBs(db).map((kb) => diagnoseKB(db, kb));
+		return listKBs(db).map((kb) => {
+			throwIfAborted(signal);
+			return diagnoseKB(db, kb, signal);
+		});
 	}
 
-	doctor(): DoctorReport {
-		const diagnostics = this.diagnose();
+	symbolSearch(query: string, options: SymbolSearchOptions = {}, signal?: AbortSignal): SymbolSearchResponse {
+		if (!this.db) throw new Error("Engine not initialized");
+		throwIfAborted(signal);
+		const db = this.db;
+		const selectedKB = options.kb_id ? (getKB(db, options.kb_id) ?? getKBByName(db, options.kb_id)) : undefined;
+		if (options.kb_id && !selectedKB) throw new Error(`Knowledge base not found: ${options.kb_id}`);
+		const limit = Math.max(1, Math.min(200, options.limit ?? 20));
+		const offset = Math.max(0, options.offset ?? 0);
+		const symbolOptions = {
+			kbId: selectedKB?.id,
+			kind: options.kind,
+			filePattern: options.file_pattern,
+			exact: options.exact,
+		};
+		const symbols = searchSymbols(db, query, {
+			...symbolOptions,
+			limit: limit + 1,
+			offset,
+		});
+		throwIfAborted(signal);
+		const page = symbols.slice(0, limit);
+		const total = countSymbols(db, query, symbolOptions);
+		throwIfAborted(signal);
+		return {
+			results: page.map((symbol) => {
+				const kb = getKB(db, symbol.kb_id);
+				return {
+					name: symbol.name,
+					kind: symbol.kind,
+					file_path: symbol.file_path,
+					file_type: symbol.file_type,
+					kb_name: kb?.name ?? "unknown",
+					start_line: symbol.start_line,
+					end_line: symbol.end_line,
+					signature: symbol.signature ?? undefined,
+					container_name: symbol.container_name ?? undefined,
+					text: symbol.text,
+					indexed_at: symbol.indexed_at,
+				};
+			}),
+			total_count: total,
+			has_more: symbols.length > limit,
+		};
+	}
+
+	doctor(signal?: AbortSignal): DoctorReport {
+		throwIfAborted(signal);
+		const diagnostics = this.diagnose(signal);
 		const issues: DoctorIssue[] = [];
 		const kbs = this.list();
 		if (kbs.length === 0) {
@@ -1377,10 +1761,12 @@ export class KnowledgeEngine {
 				severity: "blocking",
 				message: "No knowledge bases are indexed.",
 				action: "Run knowledge_add for the project root or relevant source/docs directory.",
+				action_code: "rebuild_kb",
 			});
 		}
 
 		for (const diagnostic of diagnostics) {
+			throwIfAborted(signal);
 			if (diagnostic.stuck_indexing) {
 				const phase = diagnostic.job ? ` during ${diagnostic.job.phase}` : "";
 				issues.push({
@@ -1389,6 +1775,7 @@ export class KnowledgeEngine {
 					message: `Indexing appears stuck${phase} for ${formatDuration(diagnostic.last_progress_age_ms)}.`,
 					action:
 						"Check knowledge_status for the last progress message. If no Pi process is actively indexing it, remove and rebuild this KB.",
+					action_code: "wait_for_indexing",
 				});
 			}
 			if (diagnostic.status === "error") {
@@ -1397,6 +1784,7 @@ export class KnowledgeEngine {
 					kb_name: diagnostic.kb_name,
 					message: "Knowledge base is in error state and is skipped by search.",
 					action: "Run knowledge_remove and knowledge_add to rebuild it from the source.",
+					action_code: "rebuild_kb",
 				});
 			}
 			if (diagnostic.coverage_percent < 80) {
@@ -1405,6 +1793,7 @@ export class KnowledgeEngine {
 					kb_name: diagnostic.kb_name,
 					message: `Coverage is ${diagnostic.coverage_percent}% (${diagnostic.indexed_files}/${diagnostic.total_source_files} files).`,
 					action: "Review skipped files and source path. Rebuild if index-time rules changed.",
+					action_code: "review_skipped_scope",
 				});
 			}
 			if (diagnostic.stale_files.length > 0) {
@@ -1413,6 +1802,7 @@ export class KnowledgeEngine {
 					kb_name: diagnostic.kb_name,
 					message: `${diagnostic.stale_files.length} files changed after indexing.`,
 					action: "Run knowledge_update for this KB.",
+					action_code: "run_update",
 				});
 			}
 			if (diagnostic.orphan_files.length > 0) {
@@ -1421,6 +1811,7 @@ export class KnowledgeEngine {
 					kb_name: diagnostic.kb_name,
 					message: `${diagnostic.orphan_files.length} indexed files no longer exist in the source.`,
 					action: "Run knowledge_update or rebuild the KB.",
+					action_code: "run_update",
 				});
 			}
 			if (diagnostic.skipped_files.total > 0) {
@@ -1435,7 +1826,23 @@ export class KnowledgeEngine {
 						.join(", ")}).`,
 					action:
 						"Use skipped samples to confirm exclusions are expected. Adjust source path or ignore rules if needed.",
+					action_code: "review_skipped_scope",
 				});
+			}
+		}
+
+		if (this.db) {
+			for (const kb of kbs) {
+				throwIfAborted(signal);
+				if (kb.status === "ready" && kb.chunk_count > 0 && getSymbolCount(this.db, kb.id) === 0) {
+					issues.push({
+						severity: "info",
+						kb_name: kb.name,
+						message: "No lightweight symbols are indexed for this KB.",
+						action: "Run knowledge_update to rebuild symbol/config/heading lookup metadata.",
+						action_code: "run_update",
+					});
+				}
 			}
 		}
 
@@ -1457,36 +1864,75 @@ export class KnowledgeEngine {
 			summary,
 			issues,
 			diagnostics,
+			actions: issues.map((issue) => ({
+				code: issue.action_code ?? "none",
+				kb_name: issue.kb_name,
+				target: issue.kb_name,
+				description: issue.action,
+			})),
 		};
 	}
 
-	async exportKB(nameOrId: string, outputPath: string): Promise<number> {
+	async exportKB(
+		nameOrId: string,
+		outputPath: string,
+		signal?: AbortSignal,
+		onProgress?: ProgressCallback,
+	): Promise<number> {
 		if (!this.db) throw new Error("Engine not initialized");
+		throwIfAborted(signal);
 		const kb = getKB(this.db, nameOrId) ?? getKBByName(this.db, nameOrId);
 		if (!kb) throw new Error(`Knowledge base not found: ${nameOrId}`);
-		const chunks = getChunksByKB(this.db, kb.id);
-		const { writeFileSync } = await import("node:fs");
+		return this.runExclusive(["global:mutation", `kb:${kb.id}`], `Operation for "${kb.name}"`, () =>
+			this.exportKBUnlocked(kb, outputPath, signal, onProgress),
+		);
+	}
+
+	private async exportKBUnlocked(
+		kb: KnowledgeBase,
+		outputPath: string,
+		signal?: AbortSignal,
+		onProgress?: ProgressCallback,
+	): Promise<number> {
+		if (!this.db) throw new Error("Engine not initialized");
+		const { createWriteStream } = await import("node:fs");
+		const tempOutputPath = tempVectorPath(outputPath);
+		const stream = createWriteStream(tempOutputPath, { encoding: "utf-8" });
+		let count = 0;
 		const header = JSON.stringify({
 			name: kb.name,
 			description: kb.description,
 			source_type: "text",
-			chunk_count: chunks.length,
+			chunk_count: kb.chunk_count,
 		});
-		const lines = [
-			header,
-			...chunks.map((c) =>
-				JSON.stringify({
-					content: c.content,
-					file_path: c.file_path,
-					file_type: c.file_type,
-					start_line: c.start_line,
-					end_line: c.end_line,
-					metadata_json: c.metadata_json,
-				}),
-			),
-		];
-		writeFileSync(outputPath, `${lines.join("\n")}\n`);
-		return chunks.length;
+		try {
+			await writeLine(stream, header);
+			for (const chunk of iterateChunksByKB(this.db, kb.id)) {
+				throwIfAborted(signal);
+				await writeLine(
+					stream,
+					JSON.stringify({
+						content: chunk.content,
+						file_path: chunk.file_path,
+						file_type: chunk.file_type,
+						start_line: chunk.start_line,
+						end_line: chunk.end_line,
+						metadata_json: chunk.metadata_json,
+					}),
+				);
+				count++;
+				if (count % INDEX_EMBED_BATCH_SIZE === 0) onProgress?.(`Exported ${count}/${kb.chunk_count} chunks...`);
+			}
+			await finishWriteStream(stream);
+			throwIfAborted(signal);
+			renameSync(tempOutputPath, outputPath);
+			onProgress?.(`Exported ${count}/${kb.chunk_count} chunks.`);
+			return count;
+		} catch (error) {
+			stream.destroy();
+			rmSync(tempOutputPath, { force: true });
+			throw error;
+		}
 	}
 
 	async importKB(
@@ -1495,115 +1941,141 @@ export class KnowledgeEngine {
 		signal?: AbortSignal,
 	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
 		if (!this.db) throw new Error("Engine not initialized");
-		const { readFileSync } = await import("node:fs");
-		const lines = readFileSync(inputPath, "utf-8").trim().split("\n");
-		if (lines.length < 1) throw new Error("Empty import file");
-		const header = JSON.parse(lines[0]) as { name: string; description?: string };
-		const kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
-		updateKBStatus(this.db, kb.id, "indexing");
-		startIndexingJob(this.db, kb.id, "import", `Starting import for "${header.name}"`);
+		return this.runExclusive("global:mutation", "Knowledge-base import", () =>
+			this.importKBUnlocked(inputPath, onProgress, signal),
+		);
+	}
+
+	private async importKBUnlocked(
+		inputPath: string,
+		onProgress?: ProgressCallback,
+		signal?: AbortSignal,
+	): Promise<{ kb: KnowledgeBase; chunkCount: number }> {
+		if (!this.db) throw new Error("Engine not initialized");
+		throwIfAborted(signal);
+		const { createReadStream } = await import("node:fs");
+		const { createInterface } = await import("node:readline");
+		const stream = createReadStream(inputPath, { encoding: "utf-8" });
+		const lines = createInterface({ input: stream, crlfDelay: Infinity });
+		let header: ImportHeader | undefined;
+		let kb: KnowledgeBase | undefined;
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
 		let tempVectorFile: string | undefined;
-		try {
-			const chunkData = lines.slice(1).map((l) => JSON.parse(l) as ImportedChunk);
-			const importMessage = `Importing ${chunkData.length} chunks...`;
+		let inserted = 0;
+		let lineNumber = 0;
+		const pendingChunks: ChunkInsert[] = [];
+		const pendingSymbols: ReturnType<typeof extractSymbols> = [];
+
+		const flushPending = async (): Promise<void> => {
+			if (!this.db || !kb || !vectorWriter || pendingChunks.length === 0) return;
+			throwIfAborted(signal);
+			const batch = pendingChunks.splice(0, INDEX_EMBED_BATCH_SIZE);
+			const symbols = pendingSymbols.splice(0);
+			const total = header?.chunk_count;
+			const message = `Embedding import batch: ${inserted}/${total ?? "unknown"} chunks stored`;
 			updateIndexingJob(this.db, kb.id, {
-				phase: "importing",
-				message: importMessage,
-				total_files: chunkData.length,
+				phase: "embedding",
+				message,
+				processed_chunks: inserted,
+				total_files: total,
+				added_chunks: inserted,
 			});
-			onProgress?.(importMessage);
-			const chunks = chunkData.map((c) => ({
-				content_hash: chunkIdentityHash({
-					content: c.content,
-					filePath: c.file_path,
-					fileType: c.file_type,
-					startLine: c.start_line,
-					endLine: c.end_line,
-					metadataJson: c.metadata_json || "{}",
-				}),
-				content: c.content,
-				content_tokenized: "",
-				file_path: c.file_path,
-				file_type: c.file_type,
-				start_line: c.start_line,
-				end_line: c.end_line,
-				metadata_json: c.metadata_json || "{}",
-			}));
-			const indexedChunks = chunks.map((chunk) => ({
-				...chunk,
-				content_tokenized: preTokenizeForFTS(buildChunkEmbeddingText(chunk)),
-			}));
-			const vectorPath = join(this.knowledgeDir, "vectors", `${kb.id}.bin`);
-			tempVectorFile = tempVectorPath(vectorPath);
-			vectorWriter = openVectorWriter(tempVectorFile);
-			let inserted = 0;
-			for (let offset = 0; offset < indexedChunks.length; offset += INDEX_EMBED_BATCH_SIZE) {
-				if (signal?.aborted) throw new Error("Cancelled");
-				const batch = indexedChunks.slice(offset, offset + INDEX_EMBED_BATCH_SIZE);
-				const message = `Embedding import batch ${Math.floor(offset / INDEX_EMBED_BATCH_SIZE) + 1}/${Math.ceil(
-					indexedChunks.length / INDEX_EMBED_BATCH_SIZE,
-				)}: ${offset}/${indexedChunks.length} chunks`;
-				updateIndexingJob(this.db, kb.id, {
-					phase: "embedding",
-					message,
-					processed_chunks: offset,
-					total_files: indexedChunks.length,
-					added_chunks: inserted,
-				});
-				onProgress?.(message);
-				const vectors = await embedDocuments(
-					batch.map((c) => buildChunkEmbeddingText(c)),
-					signal,
-				);
-				if (signal?.aborted) throw new Error("Cancelled");
-				insertChunks(this.db, kb.id, batch);
-				vectorWriter.append(vectors);
-				inserted += batch.length;
-				updateKBCounts(
-					this.db,
-					kb.id,
-					inserted,
-					new Set(indexedChunks.slice(0, inserted).map((c) => c.file_path)).size,
-				);
-				updateIndexingJob(this.db, kb.id, {
-					phase: "storing",
-					message: `Stored import batch: ${inserted}/${indexedChunks.length} chunks`,
-					processed_chunks: inserted,
-					total_files: indexedChunks.length,
-					added_chunks: inserted,
-				});
+			onProgress?.(message);
+			const vectors = await embedDocuments(
+				batch.map((chunk) => buildChunkEmbeddingText(chunk)),
+				signal,
+			);
+			throwIfAborted(signal);
+			insertChunks(this.db, kb.id, batch);
+			insertSymbols(this.db, kb.id, symbols);
+			vectorWriter.append(vectors);
+			inserted += batch.length;
+			updateKBCounts(this.db, kb.id, inserted, getFileCount(this.db, kb.id));
+			updateIndexingJob(this.db, kb.id, {
+				phase: "storing",
+				message: `Stored import batch: ${inserted}/${total ?? "unknown"} chunks`,
+				processed_chunks: inserted,
+				total_files: total,
+				added_chunks: inserted,
+			});
+		};
+
+		try {
+			for await (const rawLine of lines) {
+				throwIfAborted(signal);
+				lineNumber++;
+				const line = rawLine.trim();
+				if (!line) continue;
+				if (!header) {
+					header = JSON.parse(line) as ImportHeader;
+					if (!header.name) throw new Error("Import header is missing a knowledge base name");
+					const existingKB = getKBByName(this.db, header.name);
+					if (existingKB) {
+						throw new Error(
+							`Knowledge base "${header.name}" already exists. Use knowledge_update to refresh it, or knowledge_remove before importing a replacement.`,
+						);
+					}
+					kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
+					updateKBStatus(this.db, kb.id, "indexing");
+					startIndexingJob(this.db, kb.id, "import", `Starting import for "${header.name}"`);
+					const importMessage = `Importing ${header.chunk_count ?? "unknown"} chunks...`;
+					updateIndexingJob(this.db, kb.id, {
+						phase: "importing",
+						message: importMessage,
+						total_files: header.chunk_count,
+					});
+					onProgress?.(importMessage);
+					const vectorPath = this.vectorPathFor(kb.id);
+					tempVectorFile = tempVectorPath(vectorPath);
+					vectorWriter = openVectorWriter(tempVectorFile);
+					continue;
+				}
+				const imported = JSON.parse(line) as ImportedChunk;
+				const chunk = importedChunkToInsert(imported);
+				chunk.content_tokenized = preTokenizeForFTS(buildChunkEmbeddingText(chunk));
+				pendingChunks.push(chunk);
+				pendingSymbols.push(...extractSymbols(imported.content, imported.file_path, imported.file_type));
+				if (pendingChunks.length >= INDEX_EMBED_BATCH_SIZE) await flushPending();
 			}
+			if (!header) throw new Error("Empty import file");
+			if (!kb || !vectorWriter || !tempVectorFile) throw new Error("Import did not create a knowledge base");
+			await flushPending();
 			vectorWriter.close();
 			vectorWriter = undefined;
-			renameSync(tempVectorFile, vectorPath);
+			renameSync(tempVectorFile, this.vectorPathFor(kb.id));
 			tempVectorFile = undefined;
-			updateKBCounts(this.db, kb.id, indexedChunks.length, new Set(indexedChunks.map((c) => c.file_path)).size);
+			updateKBCounts(this.db, kb.id, inserted, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
 			const savedKB = getKB(this.db, kb.id);
 			if (!savedKB) throw new Error(`Knowledge base disappeared after import: ${kb.id}`);
-			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${indexedChunks.length} chunks`);
-			return { kb: savedKB, chunkCount: chunks.length };
-		} catch (e) {
+			finishIndexingJob(this.db, kb.id, "succeeded", `Ready: imported ${inserted} chunks`);
+			return { kb: savedKB, chunkCount: inserted };
+		} catch (error) {
+			lines.close();
+			stream.destroy();
 			vectorWriter?.close();
 			if (tempVectorFile) rmSync(tempVectorFile, { force: true });
-			if (this.db) {
+			if (this.db && kb) {
 				finishIndexingJob(
 					this.db,
 					kb.id,
-					isCancellationError(e) ? "cancelled" : "failed",
-					isCancellationError(e) ? "Import cancelled." : "Import failed.",
-					e instanceof Error ? e.message : String(e),
+					isCancellationError(error) ? "cancelled" : "failed",
+					isCancellationError(error) ? "Import cancelled." : `Import failed near line ${lineNumber}.`,
+					error instanceof Error ? error.message : String(error),
 				);
+				deleteKB(this.db, kb.id);
+				this.deleteVectorFile(kb.id);
 			}
-			deleteKB(this.db, kb.id);
-			throw e;
+			throw error;
 		}
 	}
 
 	async dispose(options: { disposeModels?: boolean } = {}): Promise<void> {
+		this.disposing = true;
 		const activeUpdates = [...this.activeUpdates.values()];
 		if (activeUpdates.length > 0) await Promise.allSettled(activeUpdates);
+		const activeMutations = [...this.activeMutations.values()];
+		if (activeMutations.length > 0) await Promise.allSettled(activeMutations);
 		const disposeModels = options.disposeModels ?? true;
 		if (disposeModels) {
 			await disposeEmbedding();

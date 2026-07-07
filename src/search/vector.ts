@@ -53,7 +53,9 @@ export function searchVectorFile(
 	vectorPath: string,
 	chunkIds: ChunkIdSource,
 	limit = 50,
+	signal?: AbortSignal,
 ): VectorFileSearchResult {
+	if (signal?.aborted) throw new Error("Cancelled");
 	const reader = openVectorReader(vectorPath);
 	if (!reader) return { results: [], vectorsByChunkId: new Map() };
 	try {
@@ -62,6 +64,7 @@ export function searchVectorFile(
 		const top: Array<VectorResult & { vector: Float32Array }> = [];
 		let i = 0;
 		for (const chunkIdRef of chunkIds) {
+			if (signal?.aborted) throw new Error("Cancelled");
 			if (i >= reader.count) break;
 			const vectorIndex = i;
 			i++;

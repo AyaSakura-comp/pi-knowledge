@@ -227,6 +227,7 @@
 - directory add/update 開始前先做 metadata-only planning scan，回報可索引檔案數、scannable bytes 與 skipped summary；這個 planning pass 不讀完整檔案內容。
 - add/update/import 都必須提供 progress；能估算時包含 elapsed、chunks/sec 與 file ETA。大型檔案可能讓 file ETA 偏樂觀，因此進度文字必須同時顯示 chunk throughput。
 - add/update/import 的 job state 必須持久化到 SQLite，包含 operation、status、phase、last message、started_at、last_progress_at、processed files/chunks、skipped、added、removed、unchanged 與 error_message。
+- JSONL import 必須逐行讀取、bounded batch parse/embed/store；JSONL export 必須用 chunk iterator + write stream。Import/export 是大型 KB 的搬運路徑，不能把全檔、全部 chunks 或全部 JSON strings 一次放進 heap。
 - `knowledge_status` 需要偵測 stale `indexing` 狀態，避免中斷後的半成品被誤認為健康 KB。
 - `knowledge_status` diagnostics 需用 chunk iterator 與 streaming source scan，不載入全部 chunk content 或全部來源內容，並以 persisted job state 區分「仍在進展」和「卡住」。
 - `knowledge_doctor` 以 health score + blocking/warning/info issues + concrete action 收斂使用者下一步。

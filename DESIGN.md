@@ -1,5 +1,7 @@
 # pi-knowledge — Technical Design
 
+> Status: historical design reference. The current source of truth is the implementation plus README, AGENTS.md, docs/configuration.md, docs/technical-decisions.md, and docs/known-pitfalls.md. Some sections below describe earlier shapes of the storage schema, source types, filters, and lifecycle behavior.
+
 ## 1. Problem Statement
 
 Coding agents operate within limited context windows. When working on complex projects with extensive documentation, API specs, architecture docs, and accumulated team knowledge, the agent cannot access information outside its immediate context.

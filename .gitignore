@@ -4,3 +4,4 @@ dist/
 *.hnsw
 .pi/settings.json
 .pi/knowledge/models/
+.codebase-memory/

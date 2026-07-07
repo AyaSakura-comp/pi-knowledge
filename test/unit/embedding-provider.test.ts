@@ -72,6 +72,39 @@ describe("embedding provider", () => {
 		expect(body.input[0]).toBe("passage: xxxxxxxxxxxxxxxxxxxxxxx");
 	});
 
+	it("passes AbortSignal to OpenAI-compatible embedding fetch", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		const controller = new AbortController();
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+		await embedDocuments(["hello"], controller.signal);
+
+		const [, init] = fetchMock.mock.calls[0];
+		expect(init?.signal).toBe(controller.signal);
+	});
+
+	it("normalizes aborted API embedding fetches to Cancelled without local fallback", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_FALLBACK", "local");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => {
+				throw new DOMException("The operation was aborted.", "AbortError");
+			}),
+		);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+
+		await expect(embedDocuments(["hello"])).rejects.toThrow("Cancelled");
+		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
+	});
+
 	it("falls back to the local worker only when explicitly requested", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_FALLBACK", "local");

@@ -50,4 +50,22 @@ describe("model worker client", () => {
 			"Model worker exited before responding (code 1, signal null). Worker stderr:\nnative runtime failed to load",
 		);
 	});
+
+	it("aborting one pending request does not fail unrelated worker requests", async () => {
+		const child = createFakeChild();
+		forkMock.fork.mockReturnValue(child);
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+		const firstController = new AbortController();
+
+		const first = embedInModelWorker(["cancel me"], "passage", firstController.signal);
+		const second = embedInModelWorker(["keep me"], "passage");
+		const sendMock = child.send as unknown as { mock: { calls: Array<[{ id: number }]> } }; // createFakeChild installs vi.fn send.
+		const secondMessage = sendMock.mock.calls[1][0];
+
+		firstController.abort();
+		child.emit("message", { id: secondMessage.id, result: [[0.25, 0.75]] });
+
+		await expect(first).rejects.toThrow("Cancelled");
+		await expect(second).resolves.toEqual([new Float32Array([0.25, 0.75])]);
+	});
 });

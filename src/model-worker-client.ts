@@ -99,18 +99,18 @@ async function requestModelWorker(message: Record<string, unknown>, signal?: Abo
 	const id = nextRequestId++;
 	return new Promise((resolve, reject) => {
 		let abortHandler: (() => void) | undefined;
+		const cleanup = (): void => {
+			if (abortHandler) signal?.removeEventListener("abort", abortHandler);
+		};
 		pending.set(id, { resolve, reject });
 		if (signal) {
 			abortHandler = () => {
 				pending.delete(id);
+				cleanup();
 				reject(new Error("Cancelled"));
-				shutdownModelWorker();
 			};
 			signal.addEventListener("abort", abortHandler, { once: true });
 		}
-		const cleanup = (): void => {
-			if (abortHandler) signal?.removeEventListener("abort", abortHandler);
-		};
 		const originalResolve = resolve;
 		const originalReject = reject;
 		pending.set(id, {
@@ -154,8 +154,9 @@ export async function rerankInModelWorker(
 	query: string,
 	candidates: RerankWorkerCandidate[],
 	topK: number,
+	signal?: AbortSignal,
 ): Promise<Array<{ chunkId: string; score: number }>> {
-	const result = await requestModelWorker({ type: "rerank", query, candidates, topK });
+	const result = await requestModelWorker({ type: "rerank", query, candidates, topK }, signal);
 	if (!Array.isArray(result)) throw new Error("Invalid reranker worker response");
 	return result.map((item) => {
 		if (

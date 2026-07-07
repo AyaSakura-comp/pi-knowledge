@@ -1,9 +1,26 @@
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	unlinkSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
-import { getIndexingJob, openDatabase } from "../../src/storage/sqlite.ts";
+import { getChunksByKB, getIndexingJob, openDatabase } from "../../src/storage/sqlite.ts";
+
+const mammothMock = vi.hoisted(() => ({
+	extractRawText: vi.fn(),
+}));
+
+vi.mock("mammoth", () => ({
+	extractRawText: mammothMock.extractRawText,
+}));
 
 const TEST_DIR = "/tmp/pk-test-engine";
 
@@ -14,6 +31,7 @@ describe("KnowledgeEngine", () => {
 		rmSync(TEST_DIR, { recursive: true, force: true });
 		engine = new KnowledgeEngine();
 		await engine.initialize(TEST_DIR);
+		mammothMock.extractRawText.mockReset();
 	});
 
 	afterEach(async () => {
@@ -34,9 +52,12 @@ describe("KnowledgeEngine", () => {
 
 		it("remove invalidates cache", async () => {
 			await engine.add("Content about vector caching and memory management for knowledge bases.", "ToRemove");
+			const [{ id }] = engine.list();
+			expect(existsSync(join(TEST_DIR, "vectors", `${id}.bin`))).toBe(true);
 			const before = await engine.search("vector", { mode: "fast" });
 			expect(before.total_count).toBeGreaterThan(0);
 			engine.remove("ToRemove");
+			expect(existsSync(join(TEST_DIR, "vectors", `${id}.bin`))).toBe(false);
 			const after = await engine.search("vector", { mode: "fast" });
 			expect(after.total_count).toBe(0);
 		});
@@ -44,8 +65,11 @@ describe("KnowledgeEngine", () => {
 		it("clear invalidates all caches", async () => {
 			await engine.add("First knowledge base content about databases and SQL queries.", "KB1");
 			await engine.add("Second knowledge base content about APIs and REST endpoints.", "KB2");
+			const vectorPaths = engine.list().map((kb) => join(TEST_DIR, "vectors", `${kb.id}.bin`));
+			expect(vectorPaths.every((path) => existsSync(path))).toBe(true);
 			engine.clear();
 			expect(engine.list().length).toBe(0);
+			expect(vectorPaths.every((path) => !existsSync(path))).toBe(true);
 		});
 	});
 
@@ -119,6 +143,31 @@ describe("KnowledgeEngine", () => {
 			await expect(engine.add("Replacement content about billing invoices and payments.", "Duplicate")).rejects.toThrow(
 				'Knowledge base "Duplicate" already exists',
 			);
+		});
+
+		it("rejects overlapping adds for the same knowledge base name", async () => {
+			const first = engine.add("Original overlap content about authentication tokens and sessions.", "Overlap Add");
+			const second = engine.add("Replacement overlap content about billing invoices and payments.", "Overlap Add");
+
+			await expect(second).rejects.toThrow('Mutation for "Overlap Add" is already running');
+			await first;
+			expect(engine.list()).toHaveLength(1);
+		});
+
+		it("blocks clear while add is in flight", async () => {
+			const addRun = engine.add("Clear guard content about authentication tokens and sessions.", "Clear Guard Add");
+
+			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			await addRun;
+			expect(engine.list()).toHaveLength(1);
+		});
+
+		it("blocks remove while add is in flight", async () => {
+			const addRun = engine.add("Remove guard content about authentication tokens and sessions.", "Remove Guard Add");
+
+			expect(() => engine.remove("Remove Guard Add")).toThrow("A knowledge-base mutation is already running");
+			await addRun;
+			expect(engine.list()).toHaveLength(1);
 		});
 
 		it("does not idle-dispose the embedding model during large add batches", async () => {
@@ -307,6 +356,18 @@ describe("KnowledgeEngine", () => {
 			expect(engine.list()[0].status).toBe("ready");
 		});
 
+		it("blocks remove and clear while update is in flight", async () => {
+			const sourcePath = join(TEST_DIR, "update-guard.txt");
+			writeFileSync(sourcePath, "Initial update guard content about authentication tokens.");
+			await engine.add(sourcePath, "Update Guard");
+			const [{ id }] = engine.list();
+			const updateRun = engine.update(id);
+
+			expect(() => engine.remove(id)).toThrow("A knowledge-base mutation is already running");
+			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			await updateRun;
+		});
+
 		it("updates URL knowledge bases by re-fetching the source", async () => {
 			let body = "<html><body>Original URL content about authentication tokens and sessions.</body></html>";
 			vi.stubGlobal(
@@ -323,9 +384,12 @@ describe("KnowledgeEngine", () => {
 		});
 
 		it("honors cancellation before embedding changed chunks", async () => {
-			const filePath = join(TEST_DIR, "source.txt");
+			const filePath = join(TEST_DIR, "source.ts");
 			mkdirSync(TEST_DIR, { recursive: true });
-			writeFileSync(filePath, "Initial content about authentication tokens and sessions.");
+			writeFileSync(
+				filePath,
+				"export function preservedSymbol() {}\nInitial content about authentication tokens and sessions.",
+			);
 			await engine.add(filePath, "Cancellable");
 			writeFileSync(filePath, "Changed content about billing invoices and payments.");
 
@@ -334,10 +398,40 @@ describe("KnowledgeEngine", () => {
 
 			await expect(engine.update("Cancellable", undefined, controller.signal)).rejects.toThrow("Cancelled");
 			const db = openDatabase(TEST_DIR);
-			const job = getIndexingJob(db, engine.list().find((kb) => kb.name === "Cancellable")?.id ?? "");
+			const kbId = engine.list().find((kb) => kb.name === "Cancellable")?.id ?? "";
+			const job = getIndexingJob(db, kbId);
+			const [chunk] = getChunksByKB(db, kbId);
 			db.close();
-			expect(job?.status).toBe("cancelled");
-			expect(job?.message).toBe("Update cancelled.");
+			expect(job?.status).toBe("succeeded");
+			expect(job?.message).not.toBe("Update cancelled.");
+			expect(engine.list().find((kb) => kb.name === "Cancellable")?.status).toBe("ready");
+			expect(engine.list().find((kb) => kb.name === "Cancellable")?.chunk_count).toBe(1);
+			expect((await engine.search("billing", { mode: "fast", kb_id: "Cancellable" })).total_count).toBe(0);
+			expect(chunk?.content).toContain("export function preservedSymbol() {}");
+			expect(engine.symbolSearch("preservedSymbol", { exact: true, kb_id: "Cancellable" }).total_count).toBe(1);
+		});
+
+		it("updates document files from extractors instead of raw UTF-8 bytes", async () => {
+			const filePath = join(TEST_DIR, "source.docx");
+			writeFileSync(filePath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xff, 0x00]));
+			mammothMock.extractRawText
+				.mockResolvedValueOnce({
+					value: "Initial extracted DOCX text about InitialDocxToken authentication sessions.",
+				})
+				.mockResolvedValueOnce({
+					value: "Changed extracted DOCX text about ChangedDocxToken billing invoices.",
+				});
+
+			await engine.add(filePath, "Docx Update");
+			writeFileSync(filePath, Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xfe, 0x00]));
+
+			const result = await engine.update("Docx Update");
+
+			expect(result.added).toBe(1);
+			expect(result.removed).toBe(1);
+			expect(mammothMock.extractRawText).toHaveBeenCalledTimes(2);
+			expect((await engine.search("ChangedDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(1);
+			expect((await engine.search("InitialDocxToken", { mode: "fast", kb_id: "Docx Update" })).total_count).toBe(0);
 		});
 
 		it("reports batched progress while embedding many changed chunks", async () => {
@@ -941,6 +1035,62 @@ describe("KnowledgeEngine", () => {
 			expect(engine.list()).toEqual([]);
 		});
 
+		it("blocks clear while import is in flight", async () => {
+			const inputPath = join(TEST_DIR, "guarded-import.jsonl");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(
+				inputPath,
+				[
+					JSON.stringify({ name: "Guarded Import" }),
+					JSON.stringify({
+						content: "Imported content about guarded lifecycle mutations.",
+						file_path: "import.md",
+						file_type: "markdown",
+						start_line: 1,
+						end_line: 1,
+					}),
+				].join("\n"),
+			);
+
+			const importRun = engine.importKB(inputPath);
+
+			expect(() => engine.clear()).toThrow("A knowledge-base mutation is already running");
+			await importRun;
+			expect(engine.list()).toHaveLength(1);
+		});
+
+		it("blocks remove while import is in flight", async () => {
+			const inputPath = join(TEST_DIR, "guarded-remove-import.jsonl");
+			mkdirSync(TEST_DIR, { recursive: true });
+			writeFileSync(
+				inputPath,
+				[
+					JSON.stringify({ name: "Guarded Remove Import" }),
+					JSON.stringify({
+						content: "Imported content about guarded remove lifecycle mutations.",
+						file_path: "import.md",
+						file_type: "markdown",
+						start_line: 1,
+						end_line: 1,
+					}),
+				].join("\n"),
+			);
+
+			const importRun = engine.importKB(inputPath);
+
+			expect(() => engine.remove("Guarded Remove Import")).toThrow("A knowledge-base mutation is already running");
+			await importRun;
+			expect(engine.list()).toHaveLength(1);
+		});
+
+		it("rejects imports that would duplicate an existing knowledge base name", async () => {
+			await engine.add("Existing import name content about authentication tokens.", "Import Duplicate");
+			const inputPath = join(TEST_DIR, "duplicate-import.jsonl");
+			writeFileSync(inputPath, `${JSON.stringify({ name: "Import Duplicate" })}\n`);
+
+			await expect(engine.importKB(inputPath)).rejects.toThrow('Knowledge base "Import Duplicate" already exists');
+		});
+
 		it("imports exported KBs as portable text sources", async () => {
 			await engine.add("Portable import export content about authentication tokens and sessions.", "Portable");
 			const outputPath = join(TEST_DIR, "portable.jsonl");
@@ -950,6 +1100,89 @@ describe("KnowledgeEngine", () => {
 			const { kb } = await engine.importKB(outputPath);
 			expect(kb.source_type).toBe("text");
 			expect(kb.source_path).toBeNull();
+		});
+
+		it("blocks remove while export is in flight", async () => {
+			await engine.add("Export guard content about authentication tokens and sessions.", "Export Guard");
+			const outputPath = join(TEST_DIR, "export-guard.jsonl");
+			const exportRun = engine.exportKB("Export Guard", outputPath);
+
+			expect(() => engine.remove("Export Guard")).toThrow("A knowledge-base mutation is already running");
+			await exportRun;
+			expect(existsSync(outputPath)).toBe(true);
+		});
+
+		it("keeps an existing export file when export is cancelled", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-export-cancel-"));
+			try {
+				for (let i = 0; i < 70; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Export cancel document ${i} about ExportCancelToken stable indexing. `.repeat(3),
+					);
+				}
+				await engine.add(projectDir, "Export Cancel");
+				const outputPath = join(TEST_DIR, "existing-export.jsonl");
+				writeFileSync(outputPath, "existing user export\n");
+				const controller = new AbortController();
+
+				await expect(
+					engine.exportKB("Export Cancel", outputPath, controller.signal, () => controller.abort()),
+				).rejects.toThrow("Cancelled");
+
+				expect(readFileSync(outputPath, "utf-8")).toBe("existing user export\n");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+
+		it("keeps an existing export file when cancellation arrives after the final chunk progress", async () => {
+			const projectDir = mkdtempSync(join(tmpdir(), "pk-export-final-cancel-"));
+			try {
+				for (let i = 0; i < 64; i++) {
+					writeFileSync(
+						join(projectDir, `doc-${i}.txt`),
+						`Final export cancel document ${i} about ExportFinalCancelToken stable indexing. `.repeat(3),
+					);
+				}
+				await engine.add(projectDir, "Export Final Cancel");
+				const outputPath = join(TEST_DIR, "existing-final-export.jsonl");
+				writeFileSync(outputPath, "existing final export\n");
+				const controller = new AbortController();
+				const updates: string[] = [];
+
+				await expect(
+					engine.exportKB("Export Final Cancel", outputPath, controller.signal, (message) => {
+						updates.push(message);
+						if (message === "Exported 64/64 chunks...") controller.abort();
+					}),
+				).rejects.toThrow("Cancelled");
+
+				expect(updates).toEqual(["Exported 64/64 chunks..."]);
+				expect(readFileSync(outputPath, "utf-8")).toBe("existing final export\n");
+			} finally {
+				rmSync(projectDir, { recursive: true, force: true });
+			}
+		});
+	});
+
+	describe("dispose lifecycle", () => {
+		it("waits for active mutations but rejects new mutations after shutdown starts", async () => {
+			const addRun = engine.add("Active dispose guard content about authentication tokens.", "Dispose Active");
+			const disposeRun = engine.dispose({ disposeModels: false });
+
+			await expect(engine.add("Late add content.", "Late Add")).rejects.toThrow("Knowledge engine is shutting down");
+			await expect(engine.update("Dispose Active")).rejects.toThrow("Knowledge engine is shutting down");
+			await expect(engine.importKB(join(TEST_DIR, "missing.jsonl"))).rejects.toThrow(
+				"Knowledge engine is shutting down",
+			);
+			expect(() => engine.remove("Dispose Active")).toThrow("Knowledge engine is shutting down");
+			expect(() => engine.clear()).toThrow("Knowledge engine is shutting down");
+
+			await addRun;
+			await disposeRun;
+			engine = new KnowledgeEngine();
+			await engine.initialize(TEST_DIR);
 		});
 	});
 });

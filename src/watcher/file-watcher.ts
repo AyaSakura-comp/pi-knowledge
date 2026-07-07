@@ -1,5 +1,5 @@
-import { type Dirent, existsSync, type FSWatcher, readdirSync, statSync, watch } from "node:fs";
-import { join } from "node:path";
+import { existsSync, type FSWatcher, statSync, watch } from "node:fs";
+import { createSkippedScanStats, iterateScannableFiles, type ScanOptions } from "../indexer/chunker.ts";
 
 const watchers = new Map<string, FSWatcher>();
 const pollers = new Map<string, ReturnType<typeof setInterval>>();
@@ -20,32 +20,18 @@ function scheduleUpdate(kbId: string, onUpdate: (kbId: string) => void): void {
 	);
 }
 
-function scanSnapshot(dirPath: string): Map<string, string> {
+function scanSnapshot(dirPath: string, options: ScanOptions = {}): Map<string, string> {
 	const snapshot = new Map<string, string>();
-
-	function scan(dir: string): void {
-		let entries: Dirent[];
+	if (!existsSync(dirPath)) return snapshot;
+	const skipped = createSkippedScanStats();
+	for (const file of iterateScannableFiles(dirPath, skipped, options)) {
 		try {
-			entries = readdirSync(dir, { withFileTypes: true });
+			const stat = statSync(file.path);
+			snapshot.set(file.path, `${stat.mtimeMs}:${stat.size}`);
 		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-			try {
-				const stat = statSync(fullPath);
-				if (entry.isDirectory()) {
-					scan(fullPath);
-				} else if (entry.isFile()) {
-					snapshot.set(fullPath, `${stat.mtimeMs}:${stat.size}`);
-				}
-			} catch {
-				/* file disappeared or is unreadable */
-			}
+			/* file disappeared or is unreadable */
 		}
 	}
-
-	if (existsSync(dirPath)) scan(dirPath);
 	return snapshot;
 }
 
@@ -57,13 +43,13 @@ function snapshotsDiffer(a: Map<string, string>, b: Map<string, string>): boolea
 	return false;
 }
 
-function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => void): void {
-	snapshots.set(kbId, scanSnapshot(dirPath));
+function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => void, options: ScanOptions = {}): void {
+	snapshots.set(kbId, scanSnapshot(dirPath, options));
 	pollers.set(
 		kbId,
 		setInterval(() => {
 			const previous = snapshots.get(kbId) ?? new Map<string, string>();
-			const next = scanSnapshot(dirPath);
+			const next = scanSnapshot(dirPath, options);
 			if (snapshotsDiffer(previous, next)) {
 				snapshots.set(kbId, next);
 				scheduleUpdate(kbId, onUpdate);
@@ -72,12 +58,20 @@ function startPoller(kbId: string, dirPath: string, onUpdate: (kbId: string) => 
 	);
 }
 
-export function startWatcher(kbId: string, dirPath: string, onUpdate: (kbId: string) => void): void {
+export function startWatcher(
+	kbId: string,
+	dirPath: string,
+	onUpdate: (kbId: string) => void,
+	options: ScanOptions = {},
+): void {
 	stopWatcher(kbId);
-	startPoller(kbId, dirPath, onUpdate);
+	startPoller(kbId, dirPath, onUpdate, options);
 	try {
 		const watcher = watch(dirPath, { recursive: true }, () => {
-			snapshots.set(kbId, scanSnapshot(dirPath));
+			const previous = snapshots.get(kbId) ?? new Map<string, string>();
+			const next = scanSnapshot(dirPath, options);
+			if (!snapshotsDiffer(previous, next)) return;
+			snapshots.set(kbId, next);
 			scheduleUpdate(kbId, onUpdate);
 		});
 		watcher.on("error", () => {

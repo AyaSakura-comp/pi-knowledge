@@ -11,6 +11,7 @@ Built as a native [Pi extension](https://pi.dev/docs/latest/extensions) with ver
 Agents lose project context between sessions and cannot fit large repositories into one prompt. `pi-knowledge` gives Pi and OMP durable, searchable project memory:
 
 - Search code and documentation by meaning, exact symbols, or both.
+- Look up lightweight code symbols, Markdown headings, config keys, and environment variables before broader search.
 - Keep private source data local by default.
 - Re-index changed files incrementally.
 - Diagnose stale, stuck, or low-quality indexes.
@@ -23,6 +24,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 - **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
 - **Hybrid retrieval**: semantic vectors + BM25 keyword search + normalized weighted score fusion.
 - **Code-aware indexing**: AST-aware chunking for TypeScript/JavaScript, Python, Go, Rust, and Java.
+- **Lightweight symbol lookup**: indexes functions, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
 - **Better agent answers**: adaptive context windows, diversity reranking, optional cross-encoder reranking, and diagnostics.
 - **Large-project stability**: persisted indexing progress, capped batches, streaming vector scans, and stuck-job detection.
 - **Private by default**: local embeddings run without an API key.
@@ -42,6 +44,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Incremental re-indexing** | ✅ | ❌ | ❌ |
 | **File watcher (auto-update)** | ✅ | ❌ | ❌ |
 | **Code-aware chunking** | ✅ (TS/JS/Py/Go/Rust/Java) | ❌ | ❌ |
+| **Symbol/config/heading lookup** | ✅ | ❌ | ❌ |
 | **Local embeddings (zero API)** | ✅ | ❌ | ✅ (qmd) |
 | **Index quality diagnostics** | ✅ | ❌ | ❌ |
 | **Metadata filters in search** | ✅ | ❌ | ❌ |
@@ -101,6 +104,7 @@ omp install ./pi-knowledge
 | `knowledge_plan` | Inspect an indexing source before writing a KB; reports scannable files, suggested exclusions, and technical skips |
 | `knowledge_add` | Index files, directories, URLs, PDFs, DOCX, or inline text |
 | `knowledge_search` | Hybrid, deep, or adaptive search across one or all knowledge bases |
+| `knowledge_symbol_search` | Exact or substring lookup for code symbols, route-like handlers, Markdown headings, config keys, and env vars |
 | `knowledge_remove` | Remove a knowledge base by name or ID |
 | `knowledge_update` | Incrementally re-index changed files in a knowledge base |
 | `knowledge_show` | List all knowledge bases with stats |
@@ -118,6 +122,7 @@ omp install ./pi-knowledge
 - `deep`: hybrid retrieval followed by cross-encoder reranking.
 - `adaptive`: hybrid retrieval followed by query-time contextual window expansion around seed chunks. It keeps the matched seed, prefers nearby/query-relevant neighboring chunks, and collapses overlapping windows from the same file.
 - `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
+- `code`, `config`, `errors`, `docs`, `decision`: intent aliases for agents. `code`, `config`, and `errors` bias toward exact lexical/symbol evidence; `docs` and `decision` keep hybrid recall while making the intended source type explicit.
 
 Mode selection contract:
 
@@ -128,9 +133,10 @@ Mode selection contract:
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.
 
-Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, and file-level interleaving. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, ranking coverage, path/source/test boosts, and adjusted scores.
+Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, and source freshness where available.
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
+Symbol/config/heading metadata is also rebuilt during `knowledge_update`; older KBs created before this feature may show a doctor action recommending update.
 
 ## Embedding Configuration
 
@@ -192,7 +198,7 @@ Update and diagnostics paths are also streaming-oriented: changed chunks are emb
 
 ## Architecture
 
-See [DESIGN.md](DESIGN.md) for the full technical design document and [docs/configuration.md](docs/configuration.md) for runtime configuration.
+[DESIGN.md](DESIGN.md) is the historical technical design. For current behavior contracts, prefer this README, [AGENTS.md](AGENTS.md), [docs/configuration.md](docs/configuration.md), and the ADR/pitfall notes under `docs/`.
 
 ## Data Storage
 
@@ -210,6 +216,7 @@ All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/
 - **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
 - **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
 - **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
+- **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.
 
 ## Development
 

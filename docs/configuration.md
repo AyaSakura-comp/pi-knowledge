@@ -26,8 +26,8 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Common OpenAI-compatible API root fallback. |
 | `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` | `20000` | Final per-input API embedding safety cap for OpenAI-compatible servers with smaller context windows. This does not replace chunker bounds. |
 | `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` | unset | Set to `local` to explicitly fall back to local embeddings after API failures. Without this, API failures are surfaced. |
-| `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` | unset | Set to `true` to opt into native ONNX idle disposal. Disabled by default for stable shutdown. |
-| `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle-dispose timer used only when native idle disposal is enabled. Mainly for lifecycle stress tests. |
+| `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` | unset | Enables idle timers for embedding/reranker run coordination. It does not guarantee immediate worker memory release; model-worker shutdown remains tied to engine/session shutdown. Disabled by default for stable shutdown. |
+| `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended.
@@ -39,6 +39,12 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 | `PI_KNOWLEDGE_WATCH` | unset | Set to `true` to start file watchers for directory KBs. The polling fallback remains available when native `fs.watch` fails. |
 | `PI_KNOWLEDGE_AUTO_INJECT` | unset | Set to `true` to auto-search KB context before model calls. This is opt-in. |
 | `PI_KNOWLEDGE_STALE_INDEXING_MS` | built-in stale threshold | Override the stale indexing threshold used by diagnostics and `knowledge_doctor`. |
+
+Search diagnostics include result provenance in both text output and structured `details`: chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
+
+`knowledge_doctor` emits both human-readable issues and machine-readable actions in structured `details`. Action codes include `run_update`, `rebuild_kb`, `wait_for_indexing`, `review_skipped_scope`, `rebuild_vectors`, `check_source`, and `none`. Agents should prefer these action codes over parsing the English action text.
+
+`knowledge_symbol_search` uses a lightweight symbol index stored in `knowledge.db`. It is rebuilt during `knowledge_add`, `knowledge_update`, and `knowledge_import`, and can find code symbols, route-like handlers, Markdown headings, config keys, and environment variables. Older file/directory/URL KBs without symbol metadata should be updated before relying on symbol lookup. Imported portable KBs and inline text KBs do not retain an active source path; rebuild their symbols by re-importing or re-adding the content.
 
 ## Test and Release Fixtures
 

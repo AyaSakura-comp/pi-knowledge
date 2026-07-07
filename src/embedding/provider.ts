@@ -13,6 +13,10 @@ const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK ==
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_API_MAX_EMBED_CHARS = 20_000;
 
+function isAbortError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+}
+
 function clearIdleTimer(): void {
 	if (disposeTimer) clearTimeout(disposeTimer);
 	disposeTimer = null;
@@ -59,7 +63,11 @@ export async function prepareForShutdown(): Promise<void> {
 	await waitForNoActiveRuns();
 }
 
-async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promise<Float32Array[]> {
+async function embedViaAPI(
+	texts: string[],
+	prefix: "query" | "passage",
+	signal?: AbortSignal,
+): Promise<Float32Array[]> {
 	const [provider, model] = EMBEDDING_CONFIG.split(":");
 	const configuredMaxChars = Number(process.env.PI_KNOWLEDGE_EMBEDDING_MAX_CHARS ?? DEFAULT_API_MAX_EMBED_CHARS);
 	const maxChars =
@@ -79,6 +87,7 @@ async function embedViaAPI(texts: string[], prefix: "query" | "passage"): Promis
 			method: "POST",
 			headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
 			body: JSON.stringify({ input: safeTexts, model: model || "text-embedding-3-small" }),
+			signal,
 		});
 		if (!res.ok) {
 			const detail = await res.text().catch(() => "");
@@ -97,9 +106,11 @@ export async function embedTexts(
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
 	if (!EMBEDDING_CONFIG.startsWith("local")) {
+		if (signal?.aborted) throw new Error("Cancelled");
 		try {
-			return await embedViaAPI(texts, prefix);
+			return await embedViaAPI(texts, prefix, signal);
 		} catch (error) {
+			if (signal?.aborted || isAbortError(error)) throw new Error("Cancelled");
 			if (!API_FALLBACK_TO_LOCAL) throw error;
 			console.warn(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
@@ -114,8 +125,8 @@ export async function embedTexts(
 	}
 }
 
-export async function embedQuery(text: string): Promise<Float32Array> {
-	const [vec] = await embedTexts([text], "query");
+export async function embedQuery(text: string, signal?: AbortSignal): Promise<Float32Array> {
+	const [vec] = await embedTexts([text], "query", signal);
 	return vec;
 }
 

@@ -63,11 +63,12 @@ export async function rerank(
 	query: string,
 	candidates: RerankCandidate[],
 	topK: number,
+	signal?: AbortSignal,
 ): Promise<Array<{ chunkId: string; score: number }>> {
 	if (candidates.length === 0) return [];
 	beginRun();
 	try {
-		return await rerankInModelWorker(query, candidates, topK);
+		return await rerankInModelWorker(query, candidates, topK, signal);
 	} finally {
 		endRun();
 	}
