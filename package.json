@@ -75,6 +75,6 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/nczz/pi-knowledge.git"
+		"url": "git+https://github.com/nczz/pi-knowledge.git"
 	}
 }
