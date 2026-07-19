@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.5.2] - 2026-07-19
+
+### Fixed
+- Updated `better-sqlite3` to 12.11.1 so Node 26 installs and native SQLite loading work (#4).
+
 ## [0.5.1] - 2026-07-07
 
 ### Fixed
