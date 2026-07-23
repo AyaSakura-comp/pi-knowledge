@@ -71,9 +71,9 @@
 
 **狀態**: 已決定
 
-**行為**: 首次 add/search 載入本地 embedding/reranker → Pi 主程序 fork model worker → worker 內載入 transformers.js / `onnxruntime-node` → session 內保留 worker 到 shutdown → `session_shutdown` 等 active runs 完成後用 `SIGKILL` 收掉 worker。`PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 是明確 opt-in，不是預設。
+**行為**: 首次 add/search 載入本地 embedding/reranker → Pi/OMP 主程序啟動隔離 Node model worker → worker 內載入 transformers.js / `onnxruntime-node` → session 內保留 worker 到 shutdown → `session_shutdown` 等 active runs 完成後用 `SIGKILL` 收掉 worker。Transport 優先使用 Node `fork()` IPC；若 Windows OMP 或其他相容層沒有提供 `child.send()`，自動改用 `spawn(node, ... --stdio)` 的 stdin/stdout JSONL protocol。`PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE=true` 是明確 opt-in，不是預設。
 
-**理由**: 大多數 session 不用 knowledge → 0 memory cost；一旦使用本地模型，穩定退出優先於把 native backend 留在 Pi TUI 主程序。已驗證 macOS arm64 上主程序載入 native backend 後 `/quit` 會觸發 onnxruntime `mutex lock failed` abort。
+**理由**: 大多數 session 不用 knowledge → 0 memory cost；一旦使用本地模型，穩定退出優先於把 native backend 留在 Pi/OMP TUI 主程序。已驗證 macOS arm64 上主程序載入 native backend 後 `/quit` 會觸發 onnxruntime `mutex lock failed` abort。Windows OMP 的 host runtime 可能無法提供完整 Node fork IPC，因此 worker transport 必須先驗證 IPC 能力，並以 stdio JSONL fallback 保持隔離子程序與相同 request/response contract。
 
 ---
 

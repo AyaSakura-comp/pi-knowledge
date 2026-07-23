@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 type FeatureExtractionPipeline = (
@@ -33,6 +34,7 @@ type RerankRequest = {
 };
 
 type WorkerRequest = EmbedRequest | RerankRequest;
+type WorkerResponse = { id: number; result?: unknown; error?: string };
 
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
 let rerankerPipeline: RerankerPipeline | null = null;
@@ -95,13 +97,104 @@ async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: st
 	return results.slice(0, request.topK);
 }
 
-process.on("message", (request: WorkerRequest) => {
-	void (async () => {
-		try {
-			const result = request.type === "embed" ? await handleEmbed(request) : await handleRerank(request);
-			process.send?.({ id: request.id, result });
-		} catch (error) {
-			process.send?.({ id: request.id, error: error instanceof Error ? error.message : String(error) });
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isRerankCandidateArray(value: unknown): value is Array<{ chunkId: string; content: string }> {
+	return (
+		Array.isArray(value) &&
+		value.every(
+			(item) =>
+				typeof item === "object" &&
+				item !== null &&
+				"chunkId" in item &&
+				typeof item.chunkId === "string" &&
+				"content" in item &&
+				typeof item.content === "string",
+		)
+	);
+}
+
+function parseWorkerRequest(message: unknown): WorkerRequest {
+	if (typeof message !== "object" || message === null || !("id" in message) || typeof message.id !== "number") {
+		throw new Error("Invalid worker request id");
+	}
+	if (!("type" in message)) throw new Error("Invalid worker request type");
+	if (message.type === "embed") {
+		if (!("texts" in message) || !isStringArray(message.texts)) throw new Error("Invalid embed texts");
+		if (!("prefix" in message) || (message.prefix !== "query" && message.prefix !== "passage")) {
+			throw new Error("Invalid embed prefix");
 		}
-	})();
-});
+		return { id: message.id, type: "embed", texts: message.texts, prefix: message.prefix };
+	}
+	if (message.type === "rerank") {
+		if (!("query" in message) || typeof message.query !== "string") throw new Error("Invalid rerank query");
+		if (!("topK" in message) || typeof message.topK !== "number") throw new Error("Invalid rerank topK");
+		if (!("candidates" in message) || !isRerankCandidateArray(message.candidates)) {
+			throw new Error("Invalid rerank candidates");
+		}
+		return {
+			id: message.id,
+			type: "rerank",
+			query: message.query,
+			candidates: message.candidates,
+			topK: message.topK,
+		};
+	}
+	throw new Error("Unsupported worker request type");
+}
+
+async function handleRequestMessage(message: unknown): Promise<WorkerResponse> {
+	let requestId = 0;
+	try {
+		if (typeof message === "object" && message !== null && "id" in message && typeof message.id === "number") {
+			requestId = message.id;
+		}
+		const request = parseWorkerRequest(message);
+		const result = request.type === "embed" ? await handleEmbed(request) : await handleRerank(request);
+		return { id: request.id, result };
+	} catch (error) {
+		return { id: requestId, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+function writeStdioResponse(response: WorkerResponse): void {
+	process.stdout.write(`${JSON.stringify(response)}\n`);
+}
+
+function runIpcMode(): void {
+	process.on("message", (message: unknown) => {
+		void (async () => {
+			const response = await handleRequestMessage(message);
+			process.send?.(response);
+		})();
+	});
+}
+
+function redirectConsoleOutputToStderr(): void {
+	const writeToStderr = (...args: unknown[]): void => console.error(...args);
+	console.log = writeToStderr;
+	console.info = writeToStderr;
+	console.debug = writeToStderr;
+}
+
+function runStdioMode(): void {
+	redirectConsoleOutputToStderr();
+	const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+	lines.on("line", (line) => {
+		void (async () => {
+			try {
+				writeStdioResponse(await handleRequestMessage(JSON.parse(line)));
+			} catch (error) {
+				writeStdioResponse({ id: 0, error: error instanceof Error ? error.message : String(error) });
+			}
+		})();
+	});
+}
+
+if (process.argv.includes("--stdio")) {
+	runStdioMode();
+} else {
+	runIpcMode();
+}

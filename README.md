@@ -184,7 +184,7 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 
 Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
 
-OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, and idempotent shutdown. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
+OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, Windows-safe worker transport fallback, and idempotent shutdown. Local embeddings require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
 
 ## Large Project Indexing
 

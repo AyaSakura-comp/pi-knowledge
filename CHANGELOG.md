@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.5.3] - 2026-07-23
+
+### Fixed
+- Added a Windows-safe model-worker transport fallback so OMP hosts without `child_process.fork().send()` can still build local embedding knowledge bases through a stdin/stdout JSONL worker protocol.
+- Validated the isolated worker Node 22+ executable and worker file before local model startup, with clearer `PI_KNOWLEDGE_NODE_PATH` diagnostics.
+- Hardened OMP/Windows storage-path detection for `omp.exe` hosts and Windows-style home path casing.
+
+### Changed
+- Documented Windows OMP local embedding startup requirements, transport fallback behavior, and troubleshooting guidance.
+
 ## [0.5.2] - 2026-07-19
 
 ### Fixed

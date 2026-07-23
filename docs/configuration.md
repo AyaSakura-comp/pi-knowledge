@@ -12,7 +12,7 @@
 | `OMP_CODING_AGENT_DIR` | unset | Derive the OMP host root from a configured agent directory. Used when `PI_CODING_AGENT_DIR` is not set. |
 | `OMP_PROFILE` | unset | Treat the current process as OMP-hosted for default path selection. |
 | `PI_KNOWLEDGE_MODEL_CACHE_DIR` | `<knowledge-dir>/models` | Override the local Transformers.js model cache directory. |
-| `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, otherwise `node` | Override the Node executable used to fork the isolated model worker. |
+| `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, then `NODE`, then `node` on `PATH` | Override the Node 22+ executable used to run the isolated model worker. Useful for Windows OMP packaged runtimes where the host process is not Node. |
 
 Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under OMP. For the default home OMP root, `pi-knowledge` preserves an existing legacy `~/.pi/knowledge` directory when `~/.omp/knowledge` does not exist, so existing Pi knowledge bases remain visible during migration.
 
@@ -29,6 +29,8 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` | unset | Enables idle timers for embedding/reranker run coordination. It does not guarantee immediate worker memory release; model-worker shutdown remains tied to engine/session shutdown. Disabled by default for stable shutdown. |
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
+
+Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. If worker startup fails, set `PI_KNOWLEDGE_NODE_PATH` to the full `node.exe` path or use an OpenAI-compatible embedding provider.
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended.
 
@@ -65,7 +67,7 @@ Compatibility guarantees:
 
 - The packaged `extension.js` loads built `dist/index.js` when present and falls back to source `index.ts` for local development.
 - Runtime modules are imported lazily, after the extension is actually used.
-- Local embedding and reranking models run in an isolated model worker, not in the Pi or OMP TUI process.
+- Local embedding and reranking models run in an isolated Node model worker, not in the Pi or OMP TUI process. Node IPC is preferred; stdin/stdout JSONL transport is used automatically when host IPC is unavailable.
 - Native SQLite loading includes a fallback for hoisted plugin dependency layouts.
 - OMP path resolution can use `OMP_KNOWLEDGE_DIR`, `OMP_CODING_AGENT_DIR`, and `OMP_PROFILE`.
 - Existing default Pi knowledge data can remain visible under the default OMP home root through the legacy `~/.pi/knowledge` fallback described above.

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type Database from "better-sqlite3";
 
@@ -253,6 +253,23 @@ function applyPragma(db: Database.Database, pragma: string): void {
 	db.exec(`PRAGMA ${pragma}`);
 }
 
+function basenameForHostPath(path: string): string {
+	const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+	const slashIndex = normalized.lastIndexOf("/");
+	return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
+}
+
+function normalizeForHostComparison(path: string): string {
+	const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+	return /^[A-Za-z]:\//.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function isWithinOrEqualPath(path: string, parent: string): boolean {
+	const normalizedPath = normalizeForHostComparison(path);
+	const normalizedParent = normalizeForHostComparison(parent);
+	return normalizedPath === normalizedParent || normalizedPath.startsWith(`${normalizedParent}/`);
+}
+
 export function getDefaultKnowledgeDir(): string {
 	const explicit = process.env.PI_KNOWLEDGE_DIR?.trim() || process.env.OMP_KNOWLEDGE_DIR?.trim();
 	if (explicit) return explicit;
@@ -266,14 +283,15 @@ export function getDefaultKnowledgeDir(): string {
 
 export function resolveHostKnowledgeDir(
 	hostRoot: string,
-	options: { legacyPiDir?: string; exists?: (path: string) => boolean } = {},
+	options: { legacyPiDir?: string; exists?: (path: string) => boolean; homeDir?: string } = {},
 ): string {
 	const pathExists = options.exists ?? existsSync;
 	const target = join(hostRoot, "knowledge");
-	const legacyPiDir = options.legacyPiDir ?? join(homedir(), ".pi", "knowledge");
+	const homeDir = options.homeDir ?? homedir();
+	const legacyPiDir = options.legacyPiDir ?? join(homeDir, ".pi", "knowledge");
 	if (
-		basename(hostRoot) === ".omp" &&
-		hostRoot.startsWith(homedir()) &&
+		basenameForHostPath(hostRoot) === ".omp" &&
+		isWithinOrEqualPath(hostRoot, homeDir) &&
 		!pathExists(target) &&
 		pathExists(legacyPiDir)
 	) {
@@ -285,7 +303,10 @@ export function resolveHostKnowledgeDir(
 function isOmpHost(): boolean {
 	if (process.env.OMP_PROFILE?.trim()) return true;
 	const candidates = [process.argv[1], process.execPath].filter((value): value is string => typeof value === "string");
-	return candidates.some((value) => basename(value).toLowerCase() === "omp");
+	return candidates.some((value) => {
+		const executableName = basenameForHostPath(value).toLowerCase();
+		return executableName === "omp" || executableName === "omp.exe";
+	});
 }
 
 export function openDatabase(knowledgeDir?: string): Database.Database {

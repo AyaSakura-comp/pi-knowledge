@@ -109,6 +109,18 @@ OMP plugin install validation runs in a Bun binary path that can statically reso
 
 Bun binary resolution may also fail to resolve hoisted native-package dependencies from bare package specifiers. Native loaders should first try normal resolution, then walk parent directories for the installed package entry and require that absolute path with non-literal package names so validation does not pre-resolve it.
 
+## Windows OMP model-worker IPC
+
+**症狀**: Windows 上用 OMP 執行 `knowledge_add`，第一次本地 embedding batch 可能回報 `child.send is not a function`。
+
+**原因**: OMP packaged host 或 Bun 相容層可能回傳沒有 Node IPC `.send()` 的 `child_process.fork()` child object。這不是索引來源內容、SQLite 或 KB 名稱問題，而是本地 model worker transport 啟動層的相容性問題。
+
+**緩解/修復**:
+- model worker client 必須先檢查 worker 檔案存在與 Node 22+ 可用。
+- 優先使用 Node `fork()` IPC；若 `child.send` 不存在，關掉該 child 並自動 fallback 到 `spawn(node, ... --stdio)` 的 stdin/stdout JSONL protocol。
+- stdio fallback 的 stdout 只能承載 framed JSON response；worker/stdout logging 必須 redirect 到 stderr，避免 transformers/ONNX log 污染 protocol。
+- Windows/OMP 使用者若 worker startup 仍失敗，可設定 `PI_KNOWLEDGE_NODE_PATH` 指向完整 `node.exe`，或改用 OpenAI-compatible embedding provider。
+
 ## Biome 2 config schema
 
 Biome 2 使用 `assist.actions.source.organizeImports` 和 `files.includes`；舊的 top-level `organizeImports` 與 `files.ignore` 會讓 `npm run check` 直接失敗。每次升級 Biome 後先跑 `npm run check` 確認 gate 本身可用。

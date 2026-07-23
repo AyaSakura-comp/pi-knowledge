@@ -83,7 +83,7 @@ describe("integration coverage", () => {
 		});
 
 		if (getActiveWatcherCount() === 0) {
-			expect.soft(getActiveWatcherCount(), "Recursive fs.watch is not available on this platform").toBeGreaterThan(0);
+			expect.soft(getActiveWatcherCount(), "No native watcher or polling fallback is active").toBeGreaterThan(0);
 			return;
 		}
 

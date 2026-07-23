@@ -1,5 +1,7 @@
-import { type ChildProcess, fork } from "node:child_process";
+import { type ChildProcess, execFileSync, fork, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
 type WorkerResponse = {
@@ -8,37 +10,87 @@ type WorkerResponse = {
 	error?: string;
 };
 
+type WorkerRequest = Record<string, unknown> & { id: number };
+
 type PendingRequest = {
 	resolve: (value: unknown) => void;
 	reject: (reason: Error) => void;
 };
 
-let worker: ChildProcess | null = null;
-let nextRequestId = 1;
-const pending = new Map<number, PendingRequest>();
-const WORKER_STDERR_TAIL_CHARS = 4_000;
+type SendCapableChild = ChildProcess & {
+	send: NonNullable<ChildProcess["send"]>;
+};
 
-function rejectPending(error: Error): void {
-	for (const request of pending.values()) {
-		request.reject(error);
-	}
-	pending.clear();
-}
+let worker: ModelWorkerTransport | null = null;
+let nextRequestId = 1;
+let resolvedNodeExecPath: string | null = null;
+const WORKER_STDERR_TAIL_CHARS = 4_000;
+const MIN_NODE_MAJOR = 22;
 
 function getWorkerPath(): string {
 	const workerFile = fileURLToPath(import.meta.url).endsWith(".js") ? "model-worker.js" : "model-worker.ts";
-	return fileURLToPath(new URL(`./${workerFile}`, import.meta.url));
+	const workerPath = fileURLToPath(new URL(`./${workerFile}`, import.meta.url));
+	if (!existsSync(workerPath)) {
+		throw new Error(
+			`Model worker file not found at ${workerPath}. Rebuild or reinstall pi-knowledge so the worker is packaged beside model-worker-client.`,
+		);
+	}
+	return workerPath;
 }
 
 function getWorkerExecArgv(): string[] {
 	return fileURLToPath(import.meta.url).endsWith(".js") ? [] : ["--experimental-strip-types"];
 }
 
+function parseNodeMajor(version: string): number | null {
+	const match = /^v?(?<major>\d+)\./.exec(version.trim());
+	if (!match?.groups?.major) return null;
+	const major = Number(match.groups.major);
+	return Number.isInteger(major) ? major : null;
+}
+
+function validateNodeExecPath(candidate: string): string {
+	const version = execFileSync(candidate, ["--version"], {
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "ignore"],
+		timeout: 5_000,
+		windowsHide: true,
+	}).trim();
+	const major = parseNodeMajor(version);
+	if (major === null || major < MIN_NODE_MAJOR) {
+		throw new Error(`Node ${MIN_NODE_MAJOR}+ is required for the model worker; ${candidate} reported ${version}`);
+	}
+	return candidate;
+}
+
 function getNodeExecPath(): string {
+	if (resolvedNodeExecPath) return resolvedNodeExecPath;
 	const configured = process.env.PI_KNOWLEDGE_NODE_PATH?.trim();
-	if (configured) return configured;
+	if (configured) {
+		resolvedNodeExecPath = validateNodeExecPath(configured);
+		return resolvedNodeExecPath;
+	}
 	const execName = basename(process.execPath).toLowerCase();
-	return execName === "node" || execName === "node.exe" ? process.execPath : "node";
+	const currentProcessLooksLikeNode = execName === "node" || execName === "node.exe";
+	if (currentProcessLooksLikeNode) {
+		const major = parseNodeMajor(process.version);
+		if (major !== null && major >= MIN_NODE_MAJOR) {
+			resolvedNodeExecPath = process.execPath;
+			return resolvedNodeExecPath;
+		}
+	}
+	const envNode = process.env.NODE?.trim();
+	for (const candidate of [envNode, "node"].filter((value): value is string => Boolean(value))) {
+		try {
+			resolvedNodeExecPath = validateNodeExecPath(candidate);
+			return resolvedNodeExecPath;
+		} catch {
+			// Try the next candidate before surfacing a deterministic error below.
+		}
+	}
+	throw new Error(
+		`Node ${MIN_NODE_MAJOR}+ is required for local pi-knowledge embeddings. Set PI_KNOWLEDGE_NODE_PATH to a working node.exe path.`,
+	);
 }
 
 function appendWorkerStderr(current: string, chunk: Buffer): string {
@@ -54,82 +106,210 @@ function formatWorkerExitError(code: number | null, signal: NodeJS.Signals | nul
 	return new Error(`${reason}. Worker stderr:\n${stderr}`);
 }
 
-function getWorker(): ChildProcess {
-	if (worker?.connected) return worker;
-	const workerPath = getWorkerPath();
-	worker = fork(workerPath, {
-		execPath: getNodeExecPath(),
-		execArgv: getWorkerExecArgv(),
-		stdio: ["ignore", "ignore", "pipe", "ipc"],
-		env: process.env,
-	});
-	const child = worker;
-	let stderrTail = "";
-	child.stderr?.on("data", (chunk: Buffer) => {
-		stderrTail = appendWorkerStderr(stderrTail, chunk);
-	});
-	worker.on("message", (message: WorkerResponse) => {
-		const request = pending.get(message.id);
-		if (!request) return;
-		pending.delete(message.id);
-		if (message.error) {
-			request.reject(new Error(message.error));
-		} else {
-			request.resolve(message.result);
-		}
-	});
-	worker.on("exit", (code, signal) => {
-		if (worker !== child) return;
-		worker = null;
-		if (pending.size > 0) {
-			rejectPending(formatWorkerExitError(code, signal, stderrTail));
-		}
-	});
-	worker.on("error", (error) => {
-		if (worker !== child) return;
-		worker = null;
-		rejectPending(error);
-	});
-	return worker;
+function formatWorkerSpawnError(error: Error, stderrTail: string): Error {
+	const stderr = stderrTail.trim();
+	const hint = "Set PI_KNOWLEDGE_NODE_PATH to a working Node 22+ binary if Pi or OMP is not running under Node.";
+	return new Error(
+		`Model worker failed to start: ${error.message}. ${hint}${stderr ? ` Worker stderr:\n${stderr}` : ""}`,
+	);
 }
 
-async function requestModelWorker(message: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-	if (signal?.aborted) throw new Error("Cancelled");
-	const child = getWorker();
-	const id = nextRequestId++;
-	return new Promise((resolve, reject) => {
+function isWorkerResponse(message: unknown): message is WorkerResponse {
+	if (typeof message !== "object" || message === null) return false;
+	if (!("id" in message) || typeof message.id !== "number") return false;
+	return !("error" in message) || message.error === undefined || typeof message.error === "string";
+}
+
+abstract class ModelWorkerTransport {
+	protected readonly pending = new Map<number, PendingRequest>();
+	private stderrTail = "";
+	private exited = false;
+	private spawnError: Error | null = null;
+
+	protected constructor(protected readonly child: ChildProcess) {
+		child.stderr?.on("data", (chunk: Buffer) => {
+			this.stderrTail = appendWorkerStderr(this.stderrTail, chunk);
+		});
+		child.on("exit", (code, signal) => {
+			this.exited = true;
+			if (worker === this) worker = null;
+			if (this.pending.size > 0) this.rejectPending(formatWorkerExitError(code, signal, this.stderrTail));
+		});
+		child.on("error", (error) => {
+			this.spawnError = error;
+			this.exited = true;
+			if (worker === this) worker = null;
+			this.rejectPending(formatWorkerSpawnError(error, this.stderrTail));
+		});
+	}
+
+	isConnected(): boolean {
+		return !this.exited && !this.child.killed && !this.spawnError && this.isTransportConnected();
+	}
+
+	request(message: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+		if (signal?.aborted) throw new Error("Cancelled");
+		if (!this.isConnected()) throw new Error("Model worker is not connected");
+		const id = nextRequestId++;
+		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		let abortHandler: (() => void) | undefined;
 		const cleanup = (): void => {
 			if (abortHandler) signal?.removeEventListener("abort", abortHandler);
 		};
-		pending.set(id, { resolve, reject });
 		if (signal) {
 			abortHandler = () => {
-				pending.delete(id);
+				this.pending.delete(id);
 				cleanup();
 				reject(new Error("Cancelled"));
 			};
 			signal.addEventListener("abort", abortHandler, { once: true });
 		}
-		const originalResolve = resolve;
-		const originalReject = reject;
-		pending.set(id, {
+		this.pending.set(id, {
 			resolve(value) {
 				cleanup();
-				originalResolve(value);
+				resolve(value);
 			},
 			reject(error) {
 				cleanup();
-				originalReject(error);
+				reject(error);
 			},
 		});
-		child.send({ id, ...message }, (error) => {
+		this.writeRequest({ id, ...message }, (error) => {
 			if (!error) return;
-			pending.delete(id);
+			this.pending.delete(id);
 			cleanup();
 			reject(error);
 		});
-	});
+		return promise;
+	}
+
+	shutdown(): void {
+		this.rejectPending(new Error("Model worker shut down"));
+		if (!this.child.killed) this.child.kill("SIGKILL");
+	}
+
+	protected handleWorkerResponse(message: unknown): void {
+		if (!isWorkerResponse(message)) {
+			this.rejectPending(new Error("Invalid model worker response"));
+			if (!this.child.killed) this.child.kill("SIGKILL");
+			return;
+		}
+		const request = this.pending.get(message.id);
+		if (!request) return;
+		this.pending.delete(message.id);
+		if (message.error) {
+			request.reject(new Error(message.error));
+		} else {
+			request.resolve(message.result);
+		}
+	}
+
+	protected rejectPending(error: Error): void {
+		for (const request of this.pending.values()) {
+			request.reject(error);
+		}
+		this.pending.clear();
+	}
+
+	protected abstract isTransportConnected(): boolean;
+	protected abstract writeRequest(message: WorkerRequest, callback: (error: Error | null) => void): void;
+}
+
+class IpcModelWorkerTransport extends ModelWorkerTransport {
+	private constructor(private readonly ipcChild: SendCapableChild) {
+		super(ipcChild);
+		ipcChild.on("message", (message: unknown) => this.handleWorkerResponse(message));
+	}
+
+	static create(workerPath: string): IpcModelWorkerTransport | null {
+		let child: ChildProcess;
+		try {
+			child = fork(workerPath, {
+				execPath: getNodeExecPath(),
+				execArgv: getWorkerExecArgv(),
+				stdio: ["ignore", "ignore", "pipe", "ipc"],
+				env: process.env,
+			});
+		} catch {
+			return null;
+		}
+		if (typeof child.send !== "function") {
+			if (!child.killed) child.kill("SIGKILL");
+			return null;
+		}
+		return new IpcModelWorkerTransport(child as SendCapableChild);
+	}
+
+	protected isTransportConnected(): boolean {
+		return this.ipcChild.connected;
+	}
+
+	protected writeRequest(message: WorkerRequest, callback: (error: Error | null) => void): void {
+		this.ipcChild.send(message, callback);
+	}
+}
+
+class StdioModelWorkerTransport extends ModelWorkerTransport {
+	private readonly decoder = new StringDecoder("utf8");
+	private stdoutBuffer = "";
+
+	constructor(workerPath: string) {
+		const child = spawn(getNodeExecPath(), [...getWorkerExecArgv(), workerPath, "--stdio"], {
+			stdio: ["pipe", "pipe", "pipe"],
+			env: process.env,
+			windowsHide: true,
+		});
+		super(child);
+		if (!child.stdin || !child.stdout) {
+			if (!child.killed) child.kill("SIGKILL");
+			throw new Error("Model worker stdio pipes are unavailable");
+		}
+		child.stdout.on("data", (chunk: Buffer) => this.handleStdoutChunk(chunk));
+	}
+
+	protected isTransportConnected(): boolean {
+		return this.child.stdin?.writable === true && this.child.stdin.destroyed !== true;
+	}
+
+	protected writeRequest(message: WorkerRequest, callback: (error: Error | null) => void): void {
+		const stdin = this.child.stdin;
+		if (!stdin || stdin.destroyed || !stdin.writable) {
+			callback(new Error("Model worker stdin is not writable"));
+			return;
+		}
+		stdin.write(`${JSON.stringify(message)}\n`, "utf8", (error?: Error | null) => {
+			callback(error ?? null);
+		});
+	}
+
+	private handleStdoutChunk(chunk: Buffer): void {
+		this.stdoutBuffer += this.decoder.write(chunk);
+		let newlineIndex = this.stdoutBuffer.indexOf("\n");
+		while (newlineIndex >= 0) {
+			const line = this.stdoutBuffer.slice(0, newlineIndex).trim();
+			this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
+			if (line) this.handleStdoutLine(line);
+			newlineIndex = this.stdoutBuffer.indexOf("\n");
+		}
+	}
+
+	private handleStdoutLine(line: string): void {
+		try {
+			this.handleWorkerResponse(JSON.parse(line));
+		} catch (error) {
+			this.rejectPending(
+				new Error(`Invalid model worker stdio response: ${error instanceof Error ? error.message : String(error)}`),
+			);
+			if (!this.child.killed) this.child.kill("SIGKILL");
+		}
+	}
+}
+
+function getWorker(): ModelWorkerTransport {
+	if (worker?.isConnected()) return worker;
+	const workerPath = getWorkerPath();
+	worker = IpcModelWorkerTransport.create(workerPath) ?? new StdioModelWorkerTransport(workerPath);
+	return worker;
 }
 
 export async function embedInModelWorker(
@@ -137,7 +317,7 @@ export async function embedInModelWorker(
 	prefix: "query" | "passage",
 	signal?: AbortSignal,
 ): Promise<Float32Array[]> {
-	const result = await requestModelWorker({ type: "embed", texts, prefix }, signal);
+	const result = await getWorker().request({ type: "embed", texts, prefix }, signal);
 	if (!Array.isArray(result)) throw new Error("Invalid embedding worker response");
 	return result.map((vector) => {
 		if (!Array.isArray(vector)) throw new Error("Invalid embedding vector from worker");
@@ -156,7 +336,7 @@ export async function rerankInModelWorker(
 	topK: number,
 	signal?: AbortSignal,
 ): Promise<Array<{ chunkId: string; score: number }>> {
-	const result = await requestModelWorker({ type: "rerank", query, candidates, topK }, signal);
+	const result = await getWorker().request({ type: "rerank", query, candidates, topK }, signal);
 	if (!Array.isArray(result)) throw new Error("Invalid reranker worker response");
 	return result.map((item) => {
 		if (
@@ -174,8 +354,5 @@ export async function rerankInModelWorker(
 export function shutdownModelWorker(): void {
 	const child = worker;
 	worker = null;
-	rejectPending(new Error("Model worker shut down"));
-	if (child && !child.killed) {
-		child.kill("SIGKILL");
-	}
+	child?.shutdown();
 }

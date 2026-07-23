@@ -46,6 +46,15 @@ describe("knowledge storage path", () => {
 		).toBe("/tmp/project/.omp/knowledge");
 	});
 
+	it("preserves legacy Pi storage for Windows-style home OMP paths", () => {
+		const homeDir = "C:\\Users\\Example";
+		const hostRoot = "c:\\users\\example\\.omp";
+		const legacyPiDir = "C:\\Users\\Example\\.pi\\knowledge";
+		const exists = (path: string): boolean => path === legacyPiDir;
+
+		expect(resolveHostKnowledgeDir(hostRoot, { homeDir, legacyPiDir, exists })).toBe(legacyPiDir);
+	});
+
 	it("keeps the existing Pi storage root by default", () => {
 		vi.stubEnv("OMP_PROFILE", "");
 		vi.stubEnv("PI_CODING_AGENT_DIR", "");
