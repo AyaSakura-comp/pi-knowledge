@@ -41,10 +41,21 @@ API embedding failures intentionally surface by default. Silent fallback can hid
 | `PI_KNOWLEDGE_WATCH` | unset | Set to `true` to start file watchers for directory KBs. The polling fallback remains available when native `fs.watch` fails. |
 | `PI_KNOWLEDGE_AUTO_INJECT` | unset | Set to `true` to auto-search KB context before model calls. This is opt-in. |
 | `PI_KNOWLEDGE_STALE_INDEXING_MS` | built-in stale threshold | Override the stale indexing threshold used by diagnostics and `knowledge_doctor`. |
+| `PI_KNOWLEDGE_SEARCH_PROFILE` | `auto` | Select the default search tuning profile. Values: `auto`, `balanced`, `low_token`, `precision`, `recall`, `long_context`, `code`, `docs`. Tool `profile` parameters override this. |
+| `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT` | profile default | Override the result limit used only when `knowledge_search` does not pass `limit`. Clamped to 1-50. |
+| `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH` | profile default | Override returned snippet length. Clamped to 80-4000 characters. |
+| `PI_KNOWLEDGE_MIN_HYBRID_SCORE` | profile default | Override the hybrid confidence gate. Higher values reduce noisy results; lower values increase recall. Clamped to 0-1. |
+| `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN` | profile default | Override the minimum internal retrieval candidate pool. Clamped to 10-500. |
+| `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER` | profile default | Override the internal candidate multiplier applied to the effective result limit. Clamped to 2-30. |
+| `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES` | profile default | Override surrounding lines fetched for `adaptive` context expansion. Clamped to 10-500. |
+| `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS` | profile default | Override maximum adaptive context characters per result. Clamped to 1000-50000. |
+| `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET` | profile default | Override the number of nearby/query-relevant chunks considered for adaptive windows. Clamped to 1-20. |
+| `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES` | profile default | Override how many filtered candidates `deep` mode sends to the reranker. Clamped to 5-100. |
+| `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` | profile default | Override deep rerank top-k multiplier relative to the effective result limit. Clamped to 1-10. |
 
-Search diagnostics include result provenance in both text output and structured `details`: chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
+Search diagnostics include result provenance and applied search tuning in both text output and structured `details`: selected profile, effective limit, snippet length, hybrid threshold, candidate pool size, chunk id, chunk hash, match reason, indexed timestamp, stale flag, and source mtime when the original source file is available. This provenance is stored in SQLite and derived from indexed source metadata; it does not create or modify files in the indexed project.
 
-`knowledge_search` supports `file_type` and `path_pattern` filters. `hybrid` mode is lexical-anchored to prevent low-evidence semantic false positives; use `semantic` when the query is conceptual and exact terms may differ from indexed wording.
+`knowledge_search` supports `file_type`, `path_pattern`, `profile`, and explicit `limit` filters. Search profiles tune result count, snippets, hybrid strictness, candidate breadth, adaptive context, and deep rerank breadth at runtime. `auto` chooses from query shape, mode, and KB source type; explicit tool parameters win over env overrides, env overrides win over profile defaults, and profile defaults win over built-in compatibility values. `hybrid` mode remains lexical-anchored to prevent low-evidence semantic false positives; use `semantic` when the query is conceptual and exact terms may differ from indexed wording.
 
 `knowledge_doctor` emits both human-readable issues and machine-readable actions in structured `details`. Action codes include `run_update`, `rebuild_kb`, `wait_for_indexing`, `review_skipped_scope`, `rebuild_vectors`, `check_source`, and `none`. Agents should prefer these action codes over parsing the English action text.
 

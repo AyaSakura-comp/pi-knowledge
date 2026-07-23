@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Added runtime search tuning profiles (`auto`, `low_token`, `precision`, `recall`, `long_context`, `code`, `docs`, `balanced`) with diagnostics that report the applied result limit, snippet length, hybrid threshold, candidate pool, adaptive context, and deep rerank breadth.
+
+### Changed
+- Added bounded environment overrides for search defaults so slow local model users can reduce result count, lengthen snippets, tighten hybrid precision, or tune candidate breadth without editing source.
+
 ## [0.5.5] - 2026-07-23
 
 ### Added

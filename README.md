@@ -125,6 +125,8 @@ omp install ./pi-knowledge
 - `auto`: selects a primary mode from the query shape and retries alternate modes when results are empty or weak.
 - `code`, `config`, `errors`, `docs`, `decision`: intent aliases for agents. `code`, `config`, and `errors` bias toward exact lexical/symbol evidence; `docs` and `decision` keep the intended source type explicit.
 
+Search profiles tune result count, snippet length, hybrid strictness, candidate breadth, adaptive context, and deep rerank breadth. `profile: "auto"` selects a runtime profile from query shape, mode, and KB source type; explicit tool parameters still win over profile defaults. Use `profile: "low_token"` for slow local models that need fewer, stricter, longer results in one call; use `precision` for identifiers/errors, `recall` for broad discovery, `long_context` for prose/specs, and `balanced` for compatibility.
+
 Mode selection contract:
 
 - Start with `hybrid` for most project questions that contain useful lexical anchors.
@@ -134,7 +136,7 @@ Mode selection contract:
 - Use `deep` for high-stakes answers, ambiguous top results, or final verification when slower reranking is acceptable.
 - If results are empty or weak but the KB should contain the answer, retry once with a different mode before concluding no answer exists.
 
-Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, and source freshness where available.
+Search results use balanced diversity reranking by default so near-duplicate chunks from the same file do not dominate the top results. Diversity scoring considers lexical overlap, same-file line proximity, overlapping adaptive windows, available embedding-vector similarity, file-level interleaving, and a small KB trust multiplier that favors ready file/directory sources over stale, URL, or imported text sources. Use `diversity: "off"` only when raw ranking order is needed for diagnostics. Agents can request search diagnostics to inspect mode fallback, selected profile, applied search tuning, ranking coverage, path/source/test boosts, adjusted scores, and provenance such as chunk id, chunk hash, match reason, stale flag, and source freshness where available.
 
 For best search quality, rebuild or update existing knowledge bases after upgrading. New indexes use contextual retrieval units: embeddings and FTS include file path, file type, Markdown heading breadcrumbs, and code symbol names while returned results keep the original chunk text readable. This improves queries that mention project structure, filenames, sections, or functions, and reduces duplicate-looking chunk hits.
 Symbol/config/heading metadata is also rebuilt during `knowledge_update`; older KBs created before this feature may show a doctor action recommending update.
@@ -176,7 +178,7 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 | Model worker and cache | `PI_KNOWLEDGE_MODEL_CACHE_DIR`, `PI_KNOWLEDGE_NODE_PATH` |
 | Embedding provider | `PI_KNOWLEDGE_EMBEDDING`, `OPENAI_API_KEY`, `PI_KNOWLEDGE_EMBEDDING_BASE_URL`, `OPENAI_BASE_URL`, `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS`, `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` |
 | Native lifecycle | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE`, `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` |
-| Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE` |
+| Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT`, `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER`, `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES`, `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS`, `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET`, `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES`, `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` |
 | Release fixtures | `PI_KNOWLEDGE_E2E_PDF`, `PI_KNOWLEDGE_E2E_DOCX` |
 
 ## Pi and OMP Support

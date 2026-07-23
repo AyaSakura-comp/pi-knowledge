@@ -35,6 +35,21 @@ const toolState = vi.hoisted(() => ({
 		total_count: 1,
 		has_more: false,
 		mode_used: "hybrid",
+		tuning: {
+			requested_profile: "auto",
+			selected_profile: "balanced",
+			limit: 10,
+			snippet_max_length: 240,
+			min_hybrid_score: 0.18,
+			candidate_limit: 120,
+			candidate_min: 50,
+			candidate_multiplier: 12,
+			adaptive_context_lines: 80,
+			adaptive_max_context_chars: 6000,
+			adaptive_neighbor_target: 5,
+			deep_rerank_candidates: 30,
+			deep_rerank_top_k_multiplier: 3,
+		},
 	},
 	searchOptions: undefined as unknown,
 	removeTargets: [] as string[],
@@ -164,6 +179,8 @@ describe("public tool contracts", () => {
 		expect(result?.details).toEqual(toolState.searchResponse);
 		expect(result?.content[0].text).toContain("indexed_at=123");
 		expect(result?.content[0].text).toContain("source_mtime=456");
+		expect(result?.content[0].text).toContain("profile: auto->balanced");
+		expect(result?.content[0].text).toContain("Tuning: limit=10");
 	});
 
 	it("passes path_pattern from the search tool into engine filters", async () => {
@@ -171,13 +188,14 @@ describe("public tool contracts", () => {
 
 		await tools.knowledge_search.execute?.(
 			"search",
-			{ query: "search", path_pattern: "src/engine.ts", file_type: "typescript" },
+			{ query: "search", path_pattern: "src/engine.ts", file_type: "typescript", profile: "low_token" },
 			undefined,
 			undefined,
 			undefined,
 		);
 
 		expect(toolState.searchOptions).toMatchObject({
+			profile: "low_token",
 			filters: { file_type: "typescript", path_pattern: "src/engine.ts" },
 		});
 	});

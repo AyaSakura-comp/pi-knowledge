@@ -456,6 +456,7 @@ export default function (pi: ExtensionAPI) {
 			"Use mode 'semantic' for broad conceptual questions when exact terms may differ from the indexed wording or hybrid returns no lexical matches",
 			"Use mode 'adaptive' when the user needs surrounding implementation context, related nearby sections, or enough context to make a code change",
 			"Use mode 'deep' for high-stakes answers, ambiguous top results, or final verification where slower cross-encoder reranking is acceptable",
+			"Use profile 'low_token' for slow local models that need fewer, stricter, longer snippets; use profile 'precision' for identifiers/errors and 'recall' or 'long_context' for broad prose/document research",
 			"If a search returns no results or obviously weak results, retry once with a different mode before concluding the KB lacks the answer",
 			"If top results are repetitive, retry with diversity 'strong' or mode 'adaptive' instead of increasing the limit first",
 		],
@@ -476,7 +477,19 @@ export default function (pi: ExtensionAPI) {
 					Type.Literal("decision"),
 				]),
 			),
-			limit: Type.Optional(Type.Number({ description: "Max results (default 10)" })),
+			profile: Type.Optional(
+				Type.Union([
+					Type.Literal("auto"),
+					Type.Literal("balanced"),
+					Type.Literal("low_token"),
+					Type.Literal("precision"),
+					Type.Literal("recall"),
+					Type.Literal("long_context"),
+					Type.Literal("code"),
+					Type.Literal("docs"),
+				]),
+			),
+			limit: Type.Optional(Type.Number({ description: "Max results (default comes from search profile/env)" })),
 			kb_id: Type.Optional(Type.String({ description: "Limit search to a specific KB by ID or exact name" })),
 			offset: Type.Optional(Type.Number({ description: "Pagination offset" })),
 			file_type: Type.Optional(Type.String({ description: "Filter by file type (e.g. typescript, markdown, python)" })),
@@ -490,36 +503,41 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal) {
 			const { engine } = await ensureInitialized();
-			const { query, mode, limit, kb_id, offset, file_type, path_pattern, diversity, diagnostics } = params as {
-				query: string;
-				mode?:
-					| "auto"
-					| "fast"
-					| "semantic"
-					| "hybrid"
-					| "deep"
-					| "adaptive"
-					| "code"
-					| "config"
-					| "docs"
-					| "errors"
-					| "decision";
-				limit?: number;
-				kb_id?: string;
-				offset?: number;
-				file_type?: string;
-				path_pattern?: string;
-				diversity?: "off" | "balanced" | "strong";
-				diagnostics?: boolean;
-			};
+			const { query, mode, profile, limit, kb_id, offset, file_type, path_pattern, diversity, diagnostics } =
+				params as {
+					query: string;
+					mode?:
+						| "auto"
+						| "fast"
+						| "semantic"
+						| "hybrid"
+						| "deep"
+						| "adaptive"
+						| "code"
+						| "config"
+						| "docs"
+						| "errors"
+						| "decision";
+					profile?: "auto" | "balanced" | "low_token" | "precision" | "recall" | "long_context" | "code" | "docs";
+					limit?: number;
+					kb_id?: string;
+					offset?: number;
+					file_type?: string;
+					path_pattern?: string;
+					diversity?: "off" | "balanced" | "strong";
+					diagnostics?: boolean;
+				};
 			const filters = file_type || path_pattern ? { file_type, path_pattern } : undefined;
-			const response = await engine.search(query, { mode, limit, kb_id, offset, filters, diversity }, _signal);
+			const response = await engine.search(query, { mode, profile, limit, kb_id, offset, filters, diversity }, _signal);
 			if (response.results.length === 0) {
 				const details = [
 					"No results found.",
 					response.mode_used ? `Mode used: ${response.mode_used}` : "",
 					response.retry_modes?.length ? `Retried: ${response.retry_modes.join(", ")}` : "",
 					response.warnings?.length ? `Warnings: ${response.warnings.join(" | ")}` : "",
+					diagnostics && response.tuning
+						? `Tuning: profile=${response.tuning.requested_profile}->${response.tuning.selected_profile}, limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.candidate_limit}`
+						: "",
 					response.suggestions?.length ? `Suggestions: ${response.suggestions.join(" | ")}` : "",
 				]
 					.filter(Boolean)
@@ -529,6 +547,9 @@ export default function (pi: ExtensionAPI) {
 			let output = `${response.total_count} results (showing ${response.results.length})`;
 			if (response.mode_used) output += ` — mode: ${response.mode_used}`;
 			if (response.retry_modes?.length) output += ` — retried: ${response.retry_modes.join(", ")}`;
+			if (diagnostics && response.tuning) {
+				output += ` — profile: ${response.tuning.requested_profile}->${response.tuning.selected_profile}`;
+			}
 			output += ":\n\n";
 			if (response.warnings?.length) {
 				output = `Warnings:\n- ${response.warnings.join("\n- ")}\n\n${output}`;
@@ -552,7 +573,11 @@ export default function (pi: ExtensionAPI) {
 									r.provenance.source_mtime ?? "unknown"
 								}, stale=${r.provenance.stale}`
 							: "";
-					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}${provenance}`;
+					const tuning =
+						diagnostics && response.tuning && i === 0
+							? `\nTuning: limit=${response.tuning.limit}, snippet=${response.tuning.snippet_max_length}, min_hybrid=${response.tuning.min_hybrid_score}, candidates=${response.tuning.candidate_limit}`
+							: "";
+					return `[${i + 1}] ${r.file_path} (${r.kb_name}, score: ${r.score.toFixed(3)})\n${r.snippet}${diag}${provenance}${tuning}`;
 				})
 				.join("\n\n");
 			return { content: [{ type: "text", text: output }], details: diagnostics ? response : undefined };

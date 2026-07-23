@@ -31,13 +31,18 @@ import { normalizedQueryText, tokenizeForSearch } from "./search/query.ts";
 import {
 	hasAnyLexicalEvidence,
 	hasEnoughLexicalEvidence,
-	MIN_HYBRID_SCORE,
 	normalizeFileTypeFilter,
 	queryCoverage,
 	type RankingDiagnostics,
 	scoreChunkForQuery,
 } from "./search/ranking.ts";
 import { disposeReranker, prepareRerankerForShutdown, rerank } from "./search/reranker.ts";
+import {
+	resolveSearchTuning,
+	type SearchProfile,
+	type SearchTuningSummary,
+	summarizeSearchTuning,
+} from "./search/tuning.ts";
 import { searchVectorFile } from "./search/vector.ts";
 import {
 	type Chunk,
@@ -85,6 +90,7 @@ export type SearchMode =
 
 export interface SearchOptions {
 	mode?: SearchMode;
+	profile?: SearchProfile;
 	limit?: number;
 	offset?: number;
 	kb_id?: string;
@@ -123,6 +129,7 @@ export interface SearchResponse {
 	mode_used?: SearchMode;
 	retry_modes?: SearchMode[];
 	suggestions?: string[];
+	tuning?: SearchTuningSummary;
 }
 
 export type ProgressCallback = (msg: string) => void;
@@ -219,9 +226,6 @@ export interface SymbolSearchResponse {
 	has_more: boolean;
 }
 
-const ADAPTIVE_CONTEXT_LINES = 80;
-const ADAPTIVE_MAX_CONTEXT_CHARS = 6_000;
-const ADAPTIVE_NEIGHBOR_TARGET = 5;
 const INDEX_EMBED_BATCH_SIZE = 64;
 const VECTOR_REDUNDANCY_WEIGHT = 0.35;
 
@@ -486,6 +490,7 @@ function buildAdaptiveContext(
 	seed: Chunk,
 	chunks: Chunk[],
 	queryTokens: Set<string>,
+	options: { maxContextChars: number; neighborTarget: number },
 ): {
 	content: string;
 	startLine: number;
@@ -504,7 +509,7 @@ function buildAdaptiveContext(
 			return { chunk, score: seedBoost + proximity + coverage };
 		})
 		.sort((a, b) => b.score - a.score)
-		.slice(0, ADAPTIVE_NEIGHBOR_TARGET);
+		.slice(0, options.neighborTarget);
 	if (!scored.some((item) => item.chunk.id === seed.id)) scored.push({ chunk: seed, score: Number.MAX_SAFE_INTEGER });
 
 	const selectedIds = new Set(scored.map((item) => item.chunk.id));
@@ -515,8 +520,8 @@ function buildAdaptiveContext(
 	const sourceChunkIds: string[] = [];
 	let totalLength = 0;
 	for (const chunk of ordered) {
-		if (totalLength >= ADAPTIVE_MAX_CONTEXT_CHARS) break;
-		const remaining = ADAPTIVE_MAX_CONTEXT_CHARS - totalLength;
+		if (totalLength >= options.maxContextChars) break;
+		const remaining = options.maxContextChars - totalLength;
 		const text = chunk.content.slice(0, remaining);
 		parts.push(text);
 		sourceChunkIds.push(chunk.id);
@@ -1423,11 +1428,13 @@ export class KnowledgeEngine {
 			const attempts = [primaryMode, ...fallbackModesFor(primaryMode)];
 			const tried: SearchMode[] = [];
 			const warnings: string[] = [];
+			let lastTuning: SearchTuningSummary | undefined;
 			for (const mode of attempts) {
 				if (tried.includes(mode)) continue;
 				tried.push(mode);
 				throwIfAborted(signal);
 				const response = await this.search(query, { ...options, mode }, signal);
+				lastTuning = response.tuning;
 				if (response.warnings) warnings.push(...response.warnings);
 				if (!isWeakAutoResponse(query, response, primaryMode, mode)) {
 					return {
@@ -1447,16 +1454,16 @@ export class KnowledgeEngine {
 				warnings: warnings.length > 0 ? [...new Set(warnings)] : undefined,
 				mode_used: tried.at(-1),
 				retry_modes: tried.slice(0, -1),
+				tuning: lastTuning,
 				suggestions: [
 					"No results after auto mode fallback. Check knowledge_status, try a more exact term, or rebuild the KB if indexing rules changed.",
 				],
 			};
 		}
 		const db = this.db;
-		const { mode = "hybrid", limit = 10, offset = 0, kb_id, filters, diversity = "balanced" } = options;
+		const { mode = "hybrid", offset = 0, kb_id, filters, diversity = "balanced" } = options;
 		const resolvedMode = retrievalModeFor(mode);
 		const retrievalMode = resolvedMode === "adaptive" ? "hybrid" : resolvedMode;
-		const candidateLimit = Math.max(50, offset + limit * 12);
 		const normalizedQuery = normalizedQueryText(query);
 		const queryTokens = tokenizeForSimilarity(query);
 		const normalizedFileType = normalizeFileTypeFilter(filters?.file_type);
@@ -1471,6 +1478,18 @@ export class KnowledgeEngine {
 				warnings.push(`"${kb.name}" is ${kb.status}; search skipped until indexing is ready`);
 			}
 		}
+		const tuning = resolveSearchTuning({
+			query,
+			mode,
+			profile: options.profile,
+			kbSourceTypes: kbs.map((kb) => kb.source_type),
+		});
+		const limit =
+			typeof options.limit === "number" && Number.isFinite(options.limit) && options.limit > 0
+				? Math.trunc(options.limit)
+				: tuning.defaultLimit;
+		const candidateLimit = Math.max(tuning.candidateMin, offset + limit * tuning.candidateMultiplier);
+		const tuningSummary = summarizeSearchTuning(tuning, limit, candidateLimit);
 		if (kbs.length === 0) {
 			return {
 				results: [],
@@ -1478,6 +1497,7 @@ export class KnowledgeEngine {
 				has_more: false,
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
+				tuning: tuningSummary,
 			};
 		}
 
@@ -1567,7 +1587,7 @@ export class KnowledgeEngine {
 			scored = unique.filter((result) => {
 				const chunk = getChunkById(db, result.chunkId);
 				if (!chunk) return false;
-				return result.score >= MIN_HYBRID_SCORE && hasEnoughLexicalEvidence(chunk, queryTokens);
+				return result.score >= tuning.minHybridScore && hasEnoughLexicalEvidence(chunk, queryTokens);
 			});
 		}
 		scored.sort((a, b) => b.score - a.score);
@@ -1586,14 +1606,18 @@ export class KnowledgeEngine {
 
 		if (mode === "deep" && filtered.length > 0) {
 			const candidates = filtered
-				.slice(0, 30)
+				.slice(0, tuning.deepRerankCandidates)
 				.map((r) => {
 					const chunk = getChunkById(db, r.chunkId);
 					return chunk ? { chunkId: r.chunkId, content: chunk.content } : null;
 				})
 				.filter(Boolean) as Array<{ chunkId: string; content: string }>;
-			const reranked = await rerank(query, candidates, Math.max(limit * 3, limit), signal);
-			throwIfAborted(signal);
+			const reranked = await rerank(
+				query,
+				candidates,
+				Math.max(limit * tuning.deepRerankTopKMultiplier, limit),
+				signal,
+			);
 			const ranked: RankedChunk[] = [];
 			for (const r of reranked) {
 				throwIfAborted(signal);
@@ -1606,7 +1630,7 @@ export class KnowledgeEngine {
 					ranking: scoreChunkForQuery(r.score, chunk, queryTokens),
 					score: r.score,
 					content: chunk.content,
-					snippet: buildQuerySnippet(chunk.content, query),
+					snippet: buildQuerySnippet(chunk.content, query, tuning.snippetMaxLength),
 					startLine: chunk.start_line,
 					endLine: chunk.end_line,
 					sourceChunkIds: [chunk.id],
@@ -1644,6 +1668,7 @@ export class KnowledgeEngine {
 				has_more: offset + limit < diversified.length,
 				warnings: warnings.length > 0 ? warnings : undefined,
 				mode_used: mode,
+				tuning: tuningSummary,
 			};
 		}
 
@@ -1659,17 +1684,20 @@ export class KnowledgeEngine {
 					db,
 					chunk.kb_id,
 					chunk.file_path,
-					Math.max(1, chunk.start_line - ADAPTIVE_CONTEXT_LINES),
-					chunk.end_line + ADAPTIVE_CONTEXT_LINES,
+					Math.max(1, chunk.start_line - tuning.adaptiveContextLines),
+					chunk.end_line + tuning.adaptiveContextLines,
 				);
-				const context = buildAdaptiveContext(chunk, contextChunks.length > 0 ? contextChunks : [chunk], queryTokens);
+				const context = buildAdaptiveContext(chunk, contextChunks.length > 0 ? contextChunks : [chunk], queryTokens, {
+					maxContextChars: tuning.adaptiveMaxContextChars,
+					neighborTarget: tuning.adaptiveNeighborTarget,
+				});
 				pushAdaptiveCandidate(ranked, {
 					chunk,
 					kbName: kb?.name ?? "unknown",
 					ranking: rankingByChunkId.get(r.chunkId),
 					score: r.score,
 					content: context.content,
-					snippet: buildQuerySnippet(context.content, query),
+					snippet: buildQuerySnippet(context.content, query, tuning.snippetMaxLength),
 					startLine: context.startLine,
 					endLine: context.endLine,
 					sourceChunkIds: context.sourceChunkIds,
@@ -1681,7 +1709,7 @@ export class KnowledgeEngine {
 					ranking: rankingByChunkId.get(r.chunkId),
 					score: r.score,
 					content: chunk.content,
-					snippet: buildQuerySnippet(chunk.content, query),
+					snippet: buildQuerySnippet(chunk.content, query, tuning.snippetMaxLength),
 					startLine: chunk.start_line,
 					endLine: chunk.end_line,
 					sourceChunkIds: [chunk.id],
@@ -1723,6 +1751,7 @@ export class KnowledgeEngine {
 			has_more: offset + limit < total,
 			warnings: warnings.length > 0 ? warnings : undefined,
 			mode_used: mode,
+			tuning: tuningSummary,
 			suggestions:
 				results.length === 0
 					? [
