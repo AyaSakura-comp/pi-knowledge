@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, fork, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 
@@ -49,6 +49,10 @@ function parseNodeMajor(version: string): number | null {
 	return Number.isInteger(major) ? major : null;
 }
 
+function toError(error: unknown): Error {
+	return error instanceof Error ? error : new Error(String(error));
+}
+
 function validateNodeExecPath(candidate: string): string {
 	const version = execFileSync(candidate, ["--version"], {
 		encoding: "utf8",
@@ -63,12 +67,68 @@ function validateNodeExecPath(candidate: string): string {
 	return candidate;
 }
 
+function normalizeExecutableCandidate(value: string): string {
+	const trimmed = value.trim();
+	if (
+		trimmed.length >= 2 &&
+		((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'")))
+	) {
+		return trimmed.slice(1, -1).trim();
+	}
+	return trimmed;
+}
+
+function pathEnvValue(): string {
+	return process.env.PATH ?? process.env.Path ?? process.env.path ?? "";
+}
+
+function appendIfPresent(candidates: string[], value: string | undefined, suffix?: string): void {
+	const normalized = value ? normalizeExecutableCandidate(value) : "";
+	if (!normalized) return;
+	candidates.push(suffix ? join(normalized, suffix) : normalized);
+}
+
+function getWindowsNodeCandidates(): string[] {
+	const candidates: string[] = [];
+	appendIfPresent(candidates, process.env.NVM_SYMLINK, "node.exe");
+	appendIfPresent(candidates, process.env.VOLTA_HOME, join("bin", "node.exe"));
+	appendIfPresent(candidates, process.env.ProgramFiles, join("nodejs", "node.exe"));
+	appendIfPresent(candidates, process.env["ProgramFiles(x86)"], join("nodejs", "node.exe"));
+	appendIfPresent(candidates, process.env.LOCALAPPDATA, join("Programs", "nodejs", "node.exe"));
+	for (const directory of pathEnvValue().split(delimiter)) {
+		appendIfPresent(candidates, directory, "node.exe");
+	}
+	return candidates;
+}
+
+function getNodeCandidates(): string[] {
+	const candidates: string[] = [];
+	appendIfPresent(candidates, process.env.NODE);
+	if (process.platform === "win32") {
+		candidates.push(...getWindowsNodeCandidates());
+	} else {
+		for (const directory of pathEnvValue().split(delimiter)) {
+			appendIfPresent(candidates, directory, "node");
+		}
+	}
+	candidates.push("node");
+	return [...new Set(candidates)];
+}
+
 function getNodeExecPath(): string {
 	if (resolvedNodeExecPath) return resolvedNodeExecPath;
-	const configured = process.env.PI_KNOWLEDGE_NODE_PATH?.trim();
+	const configured = process.env.PI_KNOWLEDGE_NODE_PATH
+		? normalizeExecutableCandidate(process.env.PI_KNOWLEDGE_NODE_PATH)
+		: "";
 	if (configured) {
-		resolvedNodeExecPath = validateNodeExecPath(configured);
-		return resolvedNodeExecPath;
+		try {
+			resolvedNodeExecPath = validateNodeExecPath(configured);
+			return resolvedNodeExecPath;
+		} catch (error) {
+			throw new Error(
+				`PI_KNOWLEDGE_NODE_PATH does not point to a usable Node ${MIN_NODE_MAJOR}+ executable: ${toError(error).message}`,
+			);
+		}
 	}
 	const execName = basename(process.execPath).toLowerCase();
 	const currentProcessLooksLikeNode = execName === "node" || execName === "node.exe";
@@ -79,8 +139,7 @@ function getNodeExecPath(): string {
 			return resolvedNodeExecPath;
 		}
 	}
-	const envNode = process.env.NODE?.trim();
-	for (const candidate of [envNode, "node"].filter((value): value is string => Boolean(value))) {
+	for (const candidate of getNodeCandidates()) {
 		try {
 			resolvedNodeExecPath = validateNodeExecPath(candidate);
 			return resolvedNodeExecPath;
@@ -89,7 +148,7 @@ function getNodeExecPath(): string {
 		}
 	}
 	throw new Error(
-		`Node ${MIN_NODE_MAJOR}+ is required for local pi-knowledge embeddings. Set PI_KNOWLEDGE_NODE_PATH to a working node.exe path.`,
+		`Node ${MIN_NODE_MAJOR}+ is required for local pi-knowledge embeddings, but no usable node executable was found. Install Node ${MIN_NODE_MAJOR}+ or set PI_KNOWLEDGE_NODE_PATH to the full node.exe path.`,
 	);
 }
 
@@ -124,7 +183,7 @@ abstract class ModelWorkerTransport {
 	protected readonly pending = new Map<number, PendingRequest>();
 	private stderrTail = "";
 	private exited = false;
-	private spawnError: Error | null = null;
+	private terminalError: Error | null = null;
 
 	protected constructor(protected readonly child: ChildProcess) {
 		child.stderr?.on("data", (chunk: Buffer) => {
@@ -136,20 +195,20 @@ abstract class ModelWorkerTransport {
 			if (this.pending.size > 0) this.rejectPending(formatWorkerExitError(code, signal, this.stderrTail));
 		});
 		child.on("error", (error) => {
-			this.spawnError = error;
+			this.terminalError = formatWorkerSpawnError(error, this.stderrTail);
 			this.exited = true;
 			if (worker === this) worker = null;
-			this.rejectPending(formatWorkerSpawnError(error, this.stderrTail));
+			this.rejectPending(this.terminalError);
 		});
 	}
 
 	isConnected(): boolean {
-		return !this.exited && !this.child.killed && !this.spawnError && this.isTransportConnected();
+		return !this.exited && !this.child.killed && !this.terminalError && this.isTransportConnected();
 	}
 
 	request(message: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
 		if (signal?.aborted) throw new Error("Cancelled");
-		if (!this.isConnected()) throw new Error("Model worker is not connected");
+		if (!this.isConnected()) throw this.terminalError ?? new Error("Model worker is not connected");
 		const id = nextRequestId++;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		let abortHandler: (() => void) | undefined;
@@ -221,11 +280,11 @@ class IpcModelWorkerTransport extends ModelWorkerTransport {
 		ipcChild.on("message", (message: unknown) => this.handleWorkerResponse(message));
 	}
 
-	static create(workerPath: string): IpcModelWorkerTransport | null {
+	static create(workerPath: string, nodeExecPath: string): IpcModelWorkerTransport | null {
 		let child: ChildProcess;
 		try {
 			child = fork(workerPath, {
-				execPath: getNodeExecPath(),
+				execPath: nodeExecPath,
 				execArgv: getWorkerExecArgv(),
 				stdio: ["ignore", "ignore", "pipe", "ipc"],
 				env: process.env,
@@ -253,12 +312,17 @@ class StdioModelWorkerTransport extends ModelWorkerTransport {
 	private readonly decoder = new StringDecoder("utf8");
 	private stdoutBuffer = "";
 
-	constructor(workerPath: string) {
-		const child = spawn(getNodeExecPath(), [...getWorkerExecArgv(), workerPath, "--stdio"], {
-			stdio: ["pipe", "pipe", "pipe"],
-			env: process.env,
-			windowsHide: true,
-		});
+	constructor(workerPath: string, nodeExecPath: string) {
+		let child: ChildProcess;
+		try {
+			child = spawn(nodeExecPath, [...getWorkerExecArgv(), workerPath, "--stdio"], {
+				stdio: ["pipe", "pipe", "pipe"],
+				env: process.env,
+				windowsHide: true,
+			});
+		} catch (error) {
+			throw formatWorkerSpawnError(toError(error), "");
+		}
 		super(child);
 		if (!child.stdin || !child.stdout) {
 			if (!child.killed) child.kill("SIGKILL");
@@ -308,7 +372,9 @@ class StdioModelWorkerTransport extends ModelWorkerTransport {
 function getWorker(): ModelWorkerTransport {
 	if (worker?.isConnected()) return worker;
 	const workerPath = getWorkerPath();
-	worker = IpcModelWorkerTransport.create(workerPath) ?? new StdioModelWorkerTransport(workerPath);
+	const nodeExecPath = getNodeExecPath();
+	worker =
+		IpcModelWorkerTransport.create(workerPath, nodeExecPath) ?? new StdioModelWorkerTransport(workerPath, nodeExecPath);
 	return worker;
 }
 

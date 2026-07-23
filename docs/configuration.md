@@ -30,7 +30,7 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
 
-Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. If worker startup fails, set `PI_KNOWLEDGE_NODE_PATH` to the full `node.exe` path or use an OpenAI-compatible embedding provider.
+Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches common Node, Volta, NVM, and `PATH` locations before failing. If worker startup still fails, set `PI_KNOWLEDGE_NODE_PATH` to the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended.
 

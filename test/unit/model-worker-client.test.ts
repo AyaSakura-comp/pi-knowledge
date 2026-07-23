@@ -1,9 +1,10 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const childProcessMock = vi.hoisted(() => ({
+	execFileSync: vi.fn(),
 	fork: vi.fn(),
 	spawn: vi.fn(),
 }));
@@ -24,6 +25,8 @@ type CapturedWorkerRequest = {
 	id: number;
 	type: string;
 };
+
+const ORIGINAL_EXEC_PATH = process.execPath;
 
 function createFakeChild(options: { ipc?: boolean; stdio?: boolean } = { ipc: true }): FakeChild {
 	const child = new EventEmitter() as FakeChild;
@@ -72,8 +75,17 @@ function writeStdioResponse(child: FakeChild, response: unknown): void {
 describe("model worker client", () => {
 	beforeEach(() => {
 		vi.resetModules();
+		vi.unstubAllEnvs();
+		childProcessMock.execFileSync.mockReset();
+		childProcessMock.execFileSync.mockReturnValue("v24.0.0\n");
 		childProcessMock.fork.mockReset();
 		childProcessMock.spawn.mockReset();
+		Object.defineProperty(process, "execPath", { value: ORIGINAL_EXEC_PATH, configurable: true });
+	});
+
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		Object.defineProperty(process, "execPath", { value: ORIGINAL_EXEC_PATH, configurable: true });
 	});
 
 	it("includes worker stderr when the model worker exits before responding", async () => {
@@ -88,6 +100,27 @@ describe("model worker client", () => {
 		await expect(request).rejects.toThrow(
 			"Model worker exited before responding (code 1, signal null). Worker stderr:\nnative runtime failed to load",
 		);
+	});
+
+	it("strips quotes from Windows node executable override paths", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_NODE_PATH", '"C:\\Program Files\\nodejs\\node.exe"');
+		const child = createFakeChild();
+		childProcessMock.fork.mockReturnValue(child);
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = embedInModelWorker(["hello"], "passage");
+		if (!child.send) throw new Error("Fake IPC child missing send");
+		const sendMock = vi.mocked(child.send);
+		const firstMessage = sendMock.mock.calls[0]?.[0] as { id: number } | undefined;
+		if (!firstMessage) throw new Error("Request was not sent");
+		child.emit("message", { id: firstMessage.id, result: [[0.4, 0.6]] });
+
+		expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
+			"C:\\Program Files\\nodejs\\node.exe",
+			["--version"],
+			expect.objectContaining({ windowsHide: true }),
+		);
+		await expect(request).resolves.toEqual([new Float32Array([0.4, 0.6])]);
 	});
 
 	it("aborting one pending request does not fail unrelated worker requests", async () => {
@@ -158,5 +191,43 @@ describe("model worker client", () => {
 
 		await expect(request).rejects.toThrow("Invalid model worker stdio response");
 		expect(stdioChild.kill).toHaveBeenCalledWith("SIGKILL");
+	});
+
+	it("fails before spawning when no Node executable can be resolved", async () => {
+		Object.defineProperty(process, "execPath", {
+			value: "C:\\Users\\chun\\AppData\\Local\\Programs\\omp\\omp.exe",
+			configurable: true,
+		});
+		vi.stubEnv("NODE", "");
+		vi.stubEnv("PATH", "");
+		vi.stubEnv("Path", "");
+		vi.stubEnv("NVM_SYMLINK", "");
+		vi.stubEnv("VOLTA_HOME", "");
+		vi.stubEnv("ProgramFiles", "");
+		vi.stubEnv("ProgramFiles(x86)", "");
+		vi.stubEnv("LOCALAPPDATA", "");
+		childProcessMock.execFileSync.mockImplementation(() => {
+			throw Object.assign(new Error("spawn node ENOENT"), { code: "ENOENT" });
+		});
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		await expect(embedInModelWorker(["hello"], "passage")).rejects.toThrow(
+			"Node 22+ is required for local pi-knowledge embeddings, but no usable node executable was found.",
+		);
+		expect(childProcessMock.fork).not.toHaveBeenCalled();
+		expect(childProcessMock.spawn).not.toHaveBeenCalled();
+	});
+
+	it("wraps synchronous stdio spawn failures with model-worker diagnostics", async () => {
+		const forkChild = createFakeChild({ ipc: false });
+		childProcessMock.fork.mockReturnValue(forkChild);
+		childProcessMock.spawn.mockImplementation(() => {
+			throw Object.assign(new Error("ENOENT: no such file or directory, uv_spawn 'node'"), { code: "ENOENT" });
+		});
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+		const request = embedInModelWorker(["hello"], "passage");
+
+		await expect(request).rejects.toThrow(/Model worker failed to start: .*PI_KNOWLEDGE_NODE_PATH/);
+		expect(forkChild.kill).toHaveBeenCalledWith("SIGKILL");
 	});
 });

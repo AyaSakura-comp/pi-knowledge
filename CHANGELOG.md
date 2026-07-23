@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.4] - 2026-07-23
+
+### Fixed
+- Prevented missing Windows `node.exe` from surfacing as an uncaught `uv_spawn 'node'` failure by resolving Node before worker startup and wrapping synchronous spawn failures with model-worker diagnostics.
+- Expanded Windows Node discovery to common Node, Volta, and NVM install locations, and stripped accidental surrounding quotes from `PI_KNOWLEDGE_NODE_PATH` paths with spaces.
+
+
 ## [0.5.3] - 2026-07-23
 
 ### Fixed

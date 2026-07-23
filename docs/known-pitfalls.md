@@ -111,12 +111,13 @@ Bun binary resolution may also fail to resolve hoisted native-package dependenci
 
 ## Windows OMP model-worker IPC
 
-**症狀**: Windows 上用 OMP 執行 `knowledge_add`，第一次本地 embedding batch 可能回報 `child.send is not a function`。
+**症狀**: Windows 上用 OMP 執行 `knowledge_add`，第一次本地 embedding batch 可能回報 `child.send is not a function`、`Model worker is not connected`，或在 host 層噴出 `ENOENT: no such file or directory, uv_spawn 'node'`。
 
-**原因**: OMP packaged host 或 Bun 相容層可能回傳沒有 Node IPC `.send()` 的 `child_process.fork()` child object。這不是索引來源內容、SQLite 或 KB 名稱問題，而是本地 model worker transport 啟動層的相容性問題。
+**原因**: OMP packaged host 或 Bun 相容層可能回傳沒有 Node IPC `.send()` 的 `child_process.fork()` child object；Windows 使用者也可能沒有把 Node 加到 `PATH`，或把含空白的 `node.exe` 路徑連同引號寫入環境變數。這不是索引來源內容、SQLite 或 KB 名稱問題，而是本地 model worker transport 啟動層的相容性問題。
 
 **緩解/修復**:
-- model worker client 必須先檢查 worker 檔案存在與 Node 22+ 可用。
+- model worker client 必須先檢查 worker 檔案存在與 Node 22+ 可用，不可讓 missing Node 變成未捕捉的 `uv_spawn 'node'`。
+- Windows Node discovery 應檢查 `PI_KNOWLEDGE_NODE_PATH`、`NODE`、NVM symlink、Volta、常見 `Program Files\nodejs\node.exe`、`LOCALAPPDATA\Programs\nodejs\node.exe` 與 `PATH`；路徑外層引號要先剝掉。
 - 優先使用 Node `fork()` IPC；若 `child.send` 不存在，關掉該 child 並自動 fallback 到 `spawn(node, ... --stdio)` 的 stdin/stdout JSONL protocol。
 - stdio fallback 的 stdout 只能承載 framed JSON response；worker/stdout logging 必須 redirect 到 stderr，避免 transformers/ONNX log 污染 protocol。
 - Windows/OMP 使用者若 worker startup 仍失敗，可設定 `PI_KNOWLEDGE_NODE_PATH` 指向完整 `node.exe`，或改用 OpenAI-compatible embedding provider。
