@@ -117,7 +117,7 @@ Bun binary resolution may also fail to resolve hoisted native-package dependenci
 
 **緩解/修復**:
 - model worker client 必須先檢查 worker 檔案存在與 Node 22+ 可用，不可讓 missing Node 變成未捕捉的 `uv_spawn 'node'`。
-- Windows Node discovery 應檢查 `PI_KNOWLEDGE_NODE_PATH`、`NODE`、NVM symlink、Volta、常見 `Program Files\nodejs\node.exe`、`LOCALAPPDATA\Programs\nodejs\node.exe` 與 `PATH`；路徑外層引號要先剝掉。
+- Windows Node discovery 應檢查 `PI_KNOWLEDGE_NODE_PATH`、持久化 `knowledge_configure` 設定、`NODE`、NVM symlink、Volta、常見 `Program Files\nodejs\node.exe`、`LOCALAPPDATA\Programs\nodejs\node.exe`、Codex `LOCALAPPDATA\OpenAI\Codex\runtimes\cua_node\*\bin\node.exe` 與 `PATH`；路徑外層引號要先剝掉。
 - 優先使用 Node `fork()` IPC；若 `child.send` 不存在，關掉該 child 並自動 fallback 到 `spawn(node, ... --stdio)` 的 stdin/stdout JSONL protocol。
 - stdio fallback 的 stdout 只能承載 framed JSON response；worker/stdout logging 必須 redirect 到 stderr，避免 transformers/ONNX log 污染 protocol。
 - Windows/OMP 使用者若 worker startup 仍失敗，可設定 `PI_KNOWLEDGE_NODE_PATH` 指向完整 `node.exe`，或改用 OpenAI-compatible embedding provider。

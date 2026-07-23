@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.5] - 2026-07-23
+
+### Added
+- Added `knowledge_configure` so agents can validate and persist a Node 22+ executable for the isolated local model worker without relying on environment variables injected after OMP startup.
+
+### Fixed
+- Auto-discovers Codex bundled Windows Node runtimes under `%LOCALAPPDATA%\OpenAI\Codex\runtimes\cua_node\*\bin\node.exe` for OMP sessions without global `node` on `PATH`.
+- Reuses persisted runtime config before falling back to process or PATH discovery, so one successful configuration survives future OMP sessions.
+
 ## [0.5.4] - 2026-07-23
 
 ### Fixed

@@ -110,6 +110,7 @@ omp install ./pi-knowledge
 | `knowledge_show` | List all knowledge bases with stats |
 | `knowledge_status` | Show engine status with health diagnostics (stale, orphans, coverage) |
 | `knowledge_doctor` | Diagnose health score, skipped files, stuck jobs, stale data, and recommended fixes |
+| `knowledge_configure` | Persist runtime prerequisites such as a Windows `node.exe` path for the isolated local model worker |
 | `knowledge_clear` | Remove all knowledge bases after `confirm: true` |
 | `knowledge_export` | Export a KB to shareable JSONL file |
 | `knowledge_import` | Import a KB from JSONL (re-embeds content) |

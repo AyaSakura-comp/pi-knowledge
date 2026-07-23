@@ -1,5 +1,8 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,6 +30,13 @@ type CapturedWorkerRequest = {
 };
 
 const ORIGINAL_EXEC_PATH = process.execPath;
+const tempDirs: string[] = [];
+
+function makeTempDir(): string {
+	const dir = mkdtempSync(join(tmpdir(), "pk-worker-client-"));
+	tempDirs.push(dir);
+	return dir;
+}
 
 function createFakeChild(options: { ipc?: boolean; stdio?: boolean } = { ipc: true }): FakeChild {
 	const child = new EventEmitter() as FakeChild;
@@ -86,6 +96,7 @@ describe("model worker client", () => {
 	afterEach(() => {
 		vi.unstubAllEnvs();
 		Object.defineProperty(process, "execPath", { value: ORIGINAL_EXEC_PATH, configurable: true });
+		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("includes worker stderr when the model worker exits before responding", async () => {
@@ -121,6 +132,39 @@ describe("model worker client", () => {
 			expect.objectContaining({ windowsHide: true }),
 		);
 		await expect(request).resolves.toEqual([new Float32Array([0.4, 0.6])]);
+	});
+
+	it("uses a persisted Windows node executable path before PATH discovery", async () => {
+		const knowledgeDir = makeTempDir();
+		mkdirSync(knowledgeDir, { recursive: true });
+		writeFileSync(
+			join(knowledgeDir, "config.json"),
+			JSON.stringify({
+				node_path: '"C:\\Users\\chun\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\abc\\bin\\node.exe"',
+			}),
+		);
+		Object.defineProperty(process, "execPath", {
+			value: "C:\\Users\\chun\\AppData\\Local\\Programs\\omp\\omp.exe",
+			configurable: true,
+		});
+		vi.stubEnv("PI_KNOWLEDGE_DIR", knowledgeDir);
+		const child = createFakeChild();
+		childProcessMock.fork.mockReturnValue(child);
+		const { embedInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = embedInModelWorker(["hello"], "passage");
+		if (!child.send) throw new Error("Fake IPC child missing send");
+		const sendMock = vi.mocked(child.send);
+		const firstMessage = sendMock.mock.calls[0]?.[0] as { id: number } | undefined;
+		if (!firstMessage) throw new Error("Request was not sent");
+		child.emit("message", { id: firstMessage.id, result: [[0.7, 0.3]] });
+
+		expect(childProcessMock.execFileSync).toHaveBeenCalledWith(
+			"C:\\Users\\chun\\AppData\\Local\\OpenAI\\Codex\\runtimes\\cua_node\\abc\\bin\\node.exe",
+			["--version"],
+			expect.objectContaining({ windowsHide: true }),
+		);
+		await expect(request).resolves.toEqual([new Float32Array([0.7, 0.3])]);
 	});
 
 	it("aborting one pending request does not fail unrelated worker requests", async () => {
@@ -198,6 +242,7 @@ describe("model worker client", () => {
 			value: "C:\\Users\\chun\\AppData\\Local\\Programs\\omp\\omp.exe",
 			configurable: true,
 		});
+		vi.stubEnv("PI_KNOWLEDGE_DIR", makeTempDir());
 		vi.stubEnv("NODE", "");
 		vi.stubEnv("PATH", "");
 		vi.stubEnv("Path", "");

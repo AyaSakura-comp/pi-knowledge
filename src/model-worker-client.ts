@@ -1,8 +1,9 @@
 import { type ChildProcess, execFileSync, fork, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { getConfiguredNodePath, writeRuntimeConfig } from "./runtime-config.ts";
 
 type WorkerResponse = {
 	id: number;
@@ -88,6 +89,23 @@ function appendIfPresent(candidates: string[], value: string | undefined, suffix
 	candidates.push(suffix ? join(normalized, suffix) : normalized);
 }
 
+function appendCodexNodeCandidates(candidates: string[]): void {
+	const localAppData = process.env.LOCALAPPDATA ? normalizeExecutableCandidate(process.env.LOCALAPPDATA) : "";
+	if (!localAppData) return;
+	const runtimeRoot = join(localAppData, "OpenAI", "Codex", "runtimes", "cua_node");
+	if (!existsSync(runtimeRoot)) return;
+	const discovered = readdirSync(runtimeRoot, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry) => {
+			const nodePath = join(runtimeRoot, entry.name, "bin", "node.exe");
+			const mtimeMs = existsSync(nodePath) ? statSync(nodePath).mtimeMs : 0;
+			return { nodePath, mtimeMs };
+		})
+		.filter((candidate) => candidate.mtimeMs > 0)
+		.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	for (const candidate of discovered) candidates.push(candidate.nodePath);
+}
+
 function getWindowsNodeCandidates(): string[] {
 	const candidates: string[] = [];
 	appendIfPresent(candidates, process.env.NVM_SYMLINK, "node.exe");
@@ -95,6 +113,7 @@ function getWindowsNodeCandidates(): string[] {
 	appendIfPresent(candidates, process.env.ProgramFiles, join("nodejs", "node.exe"));
 	appendIfPresent(candidates, process.env["ProgramFiles(x86)"], join("nodejs", "node.exe"));
 	appendIfPresent(candidates, process.env.LOCALAPPDATA, join("Programs", "nodejs", "node.exe"));
+	appendCodexNodeCandidates(candidates);
 	for (const directory of pathEnvValue().split(delimiter)) {
 		appendIfPresent(candidates, directory, "node.exe");
 	}
@@ -130,6 +149,15 @@ function getNodeExecPath(): string {
 			);
 		}
 	}
+	const persisted = getConfiguredNodePath();
+	if (persisted) {
+		try {
+			resolvedNodeExecPath = validateNodeExecPath(normalizeExecutableCandidate(persisted));
+			return resolvedNodeExecPath;
+		} catch {
+			// Persisted paths can point at removable Codex runtimes; continue with auto-discovery.
+		}
+	}
 	const execName = basename(process.execPath).toLowerCase();
 	const currentProcessLooksLikeNode = execName === "node" || execName === "node.exe";
 	if (currentProcessLooksLikeNode) {
@@ -150,6 +178,21 @@ function getNodeExecPath(): string {
 	throw new Error(
 		`Node ${MIN_NODE_MAJOR}+ is required for local pi-knowledge embeddings, but no usable node executable was found. Install Node ${MIN_NODE_MAJOR}+ or set PI_KNOWLEDGE_NODE_PATH to the full node.exe path.`,
 	);
+}
+
+export function validateModelWorkerNodePath(nodePath: string): string {
+	return validateNodeExecPath(normalizeExecutableCandidate(nodePath));
+}
+
+export function resolveModelWorkerNodePath(): string {
+	return getNodeExecPath();
+}
+
+export function configureModelWorkerNodePath(nodePath?: string): string {
+	const resolved = nodePath ? validateModelWorkerNodePath(nodePath) : getNodeExecPath();
+	writeRuntimeConfig({ node_path: resolved });
+	resolvedNodeExecPath = resolved;
+	return resolved;
 }
 
 function appendWorkerStderr(current: string, chunk: Buffer): string {

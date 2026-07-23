@@ -312,6 +312,43 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "knowledge_configure",
+		label: "Knowledge Configure",
+		description: "Configure pi-knowledge runtime settings such as the local model worker Node executable",
+		promptSnippet: "Configure local pi-knowledge runtime prerequisites before indexing",
+		promptGuidelines: [
+			"Use knowledge_configure when knowledge_doctor or knowledge_add reports that local embeddings cannot find a usable Node executable",
+			"On Windows, pass the full node.exe path when the user provides one; paths with spaces are accepted",
+			"If node_path is omitted, the tool auto-discovers a usable Node 22+ executable and persists it for future sessions",
+			"Do not switch users to API embeddings unless they explicitly choose a network embedding provider",
+		],
+		parameters: Type.Object({
+			node_path: Type.Optional(
+				Type.String({
+					description:
+						"Optional full path to a Node 22+ executable for the isolated local embedding model worker, such as C:\\Program Files\\nodejs\\node.exe",
+				}),
+			),
+		}),
+		async execute(_id, params, _signal) {
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const { configureModelWorkerNodePath } = await import(runtimeModule("./src/model-worker-client"));
+			if (_signal?.aborted) throw new Error("Cancelled");
+			const nodePath = typeof params.node_path === "string" && params.node_path.trim() ? params.node_path : undefined;
+			const configuredPath = configureModelWorkerNodePath(nodePath);
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Configured local model worker Node executable: ${configuredPath}`,
+					},
+				],
+				details: { node_path: configuredPath },
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "knowledge_add",
 		label: "Knowledge Add",
 		description: "Index files, directories, URLs, PDFs, DOCX, or text into a named knowledge base for semantic search",
