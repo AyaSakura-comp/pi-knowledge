@@ -27,6 +27,7 @@ type FakeChild = ChildProcess & {
 type CapturedWorkerRequest = {
 	id: number;
 	type: string;
+	[key: string]: unknown;
 };
 
 const ORIGINAL_EXEC_PATH = process.execPath;
@@ -185,6 +186,37 @@ describe("model worker client", () => {
 
 		await expect(first).rejects.toThrow("Cancelled");
 		await expect(second).resolves.toEqual([new Float32Array([0.25, 0.75])]);
+	});
+
+	it("sends resolved reranker config with rerank worker requests", async () => {
+		const child = createFakeChild();
+		childProcessMock.fork.mockReturnValue(child);
+		const { rerankInModelWorker } = await import("../../src/model-worker-client.ts");
+
+		const request = rerankInModelWorker("query", [{ chunkId: "chunk-1", content: "document" }], 1, {
+			provider: "hf",
+			model: "Xenova/ms-marco-MiniLM-L-2-v2",
+			revision: "test-revision",
+			dtype: "fp32",
+		});
+		if (!child.send) throw new Error("Fake IPC child missing send");
+		const sendMock = vi.mocked(child.send);
+		const firstMessage = sendMock.mock.calls[0]?.[0] as CapturedWorkerRequest | undefined;
+		if (!firstMessage) throw new Error("Request was not sent");
+		child.emit("message", { id: firstMessage.id, result: [{ chunkId: "chunk-1", score: 0.9 }] });
+
+		expect(firstMessage).toMatchObject({
+			type: "rerank",
+			query: "query",
+			topK: 1,
+			reranker: {
+				provider: "hf",
+				model: "Xenova/ms-marco-MiniLM-L-2-v2",
+				revision: "test-revision",
+				dtype: "fp32",
+			},
+		});
+		await expect(request).resolves.toEqual([{ chunkId: "chunk-1", score: 0.9 }]);
 	});
 
 	it("falls back to stdio transport when fork does not expose child.send", async () => {

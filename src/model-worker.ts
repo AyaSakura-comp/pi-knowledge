@@ -1,5 +1,13 @@
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import type { HfRerankerConfig } from "./search/reranker-config.ts";
+import {
+	DEFAULT_RERANKER_REMOTE_HOST,
+	DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE,
+	isHfRerankerConfig,
+	rerankerCacheKey,
+	resolveRerankerConfig,
+} from "./search/reranker-config.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 type FeatureExtractionPipeline = (
@@ -16,6 +24,8 @@ type TransformersEnv = {
 	cacheDir?: string;
 	allowRemoteModels?: boolean;
 	localModelPath?: string;
+	remoteHost?: string;
+	remotePathTemplate?: string;
 };
 
 type EmbedRequest = {
@@ -31,13 +41,14 @@ type RerankRequest = {
 	query: string;
 	candidates: Array<{ chunkId: string; content: string }>;
 	topK: number;
+	reranker: HfRerankerConfig;
 };
 
 type WorkerRequest = EmbedRequest | RerankRequest;
 type WorkerResponse = { id: number; result?: unknown; error?: string };
 
 let embeddingPipeline: FeatureExtractionPipeline | null = null;
-let rerankerPipeline: RerankerPipeline | null = null;
+let rerankerPipeline: { key: string; pipe: RerankerPipeline } | null = null;
 
 function getModelCacheDir(): string {
 	return process.env.PI_KNOWLEDGE_MODEL_CACHE_DIR ?? join(getDefaultKnowledgeDir(), "models");
@@ -65,13 +76,19 @@ async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	return loaded;
 }
 
-async function loadRerankerPipeline(): Promise<RerankerPipeline> {
-	if (rerankerPipeline) return rerankerPipeline;
+async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerPipeline> {
+	const key = rerankerCacheKey(config);
+	if (rerankerPipeline?.key === key) return rerankerPipeline.pipe;
 	const { pipeline, env } = await import("@huggingface/transformers");
-	configureTransformersEnv(env as TransformersEnv);
+	const transformersEnv = env as TransformersEnv;
+	configureTransformersEnv(transformersEnv);
+	transformersEnv.remoteHost = config.remoteHost ?? DEFAULT_RERANKER_REMOTE_HOST;
+	transformersEnv.remotePathTemplate = config.remotePathTemplate ?? DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE;
 	const createPipeline = pipeline as PipelineFactory;
-	const loaded = (await createPipeline("text-classification", "Xenova/ms-marco-MiniLM-L-4-v2")) as RerankerPipeline;
-	rerankerPipeline = loaded;
+	const options: Record<string, unknown> = { revision: config.revision };
+	if (config.dtype) options.dtype = config.dtype;
+	const loaded = (await createPipeline("text-classification", config.model, options)) as RerankerPipeline;
+	rerankerPipeline = { key, pipe: loaded };
 	return loaded;
 }
 
@@ -86,7 +103,7 @@ async function handleEmbed(request: EmbedRequest): Promise<number[][]> {
 }
 
 async function handleRerank(request: RerankRequest): Promise<Array<{ chunkId: string; score: number }>> {
-	const pipe = await loadRerankerPipeline();
+	const pipe = await loadRerankerPipeline(request.reranker);
 	const results: Array<{ chunkId: string; score: number }> = [];
 	for (const candidate of request.candidates) {
 		const output = await pipe({ text: request.query, text_pair: candidate.content });
@@ -134,12 +151,16 @@ function parseWorkerRequest(message: unknown): WorkerRequest {
 		if (!("candidates" in message) || !isRerankCandidateArray(message.candidates)) {
 			throw new Error("Invalid rerank candidates");
 		}
+		const reranker =
+			"reranker" in message && isHfRerankerConfig(message.reranker) ? message.reranker : resolveRerankerConfig();
+		if (reranker.provider !== "hf") throw new Error("Reranker API mode is not supported by the model worker");
 		return {
 			id: message.id,
 			type: "rerank",
 			query: message.query,
 			candidates: message.candidates,
 			topK: message.topK,
+			reranker,
 		};
 	}
 	throw new Error("Unsupported worker request type");

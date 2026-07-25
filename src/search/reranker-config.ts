@@ -1,0 +1,114 @@
+export type RerankerProvider = "hf" | "api";
+
+export interface HfRerankerConfig {
+	provider: "hf";
+	model: string;
+	revision: string;
+	dtype?: string;
+	remoteHost?: string;
+	remotePathTemplate?: string;
+}
+
+export interface ApiRerankerConfig {
+	provider: "api";
+	model: string;
+}
+
+export type RerankerConfig = HfRerankerConfig | ApiRerankerConfig;
+
+export const DEFAULT_RERANKER_MODEL = "Xenova/ms-marco-MiniLM-L-4-v2";
+export const DEFAULT_RERANKER_REVISION = "main";
+export const DEFAULT_RERANKER_REMOTE_HOST = "https://huggingface.co/";
+export const DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE = "{model}/resolve/{revision}/";
+
+function cleanEnv(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function stripProviderPrefix(raw: string): { provider: RerankerProvider | undefined; value: string } {
+	const separator = raw.indexOf(":");
+	if (separator <= 0) return { provider: undefined, value: raw };
+	const prefix = raw.slice(0, separator).toLowerCase();
+	if (prefix !== "hf" && prefix !== "api") return { provider: undefined, value: raw };
+	return { provider: prefix, value: raw.slice(separator + 1) };
+}
+
+function parseHuggingFaceUrl(raw: string): { model: string; revision?: string; remoteHost?: string } | undefined {
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		return undefined;
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") {
+		throw new Error(`Unsupported reranker model URL protocol: ${url.protocol}`);
+	}
+	const parts = url.pathname.split("/").filter(Boolean);
+	if (parts.length < 2) throw new Error(`Invalid Hugging Face reranker URL: ${raw}`);
+	const model = `${decodeURIComponent(parts[0])}/${decodeURIComponent(parts[1])}`;
+	let revision: string | undefined;
+	const treeIndex = parts.indexOf("tree");
+	const resolveIndex = parts.indexOf("resolve");
+	if (treeIndex >= 0 && parts[treeIndex + 1]) revision = decodeURIComponent(parts[treeIndex + 1]);
+	if (resolveIndex >= 0 && parts[resolveIndex + 1]) revision = decodeURIComponent(parts[resolveIndex + 1]);
+	return { model, revision, remoteHost: `${url.origin}/` };
+}
+
+function resolveHfModel(raw: string): { model: string; revision?: string; remoteHost?: string } {
+	const parsedUrl = parseHuggingFaceUrl(raw);
+	if (parsedUrl) return parsedUrl;
+	if (!raw.includes("/") || raw.startsWith("/") || raw.endsWith("/")) {
+		throw new Error(`Invalid reranker model id: ${raw}`);
+	}
+	return { model: raw };
+}
+
+export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): RerankerConfig {
+	const raw = cleanEnv(env.PI_KNOWLEDGE_RERANKER) ?? `hf:${DEFAULT_RERANKER_MODEL}`;
+	const { provider, value } = stripProviderPrefix(raw);
+	if (provider === "api") {
+		const model = value.trim();
+		if (!model) throw new Error("PI_KNOWLEDGE_RERANKER=api:<model> requires a model name");
+		return { provider: "api", model };
+	}
+	if (provider !== undefined && provider !== "hf") throw new Error(`Unsupported reranker provider: ${provider}`);
+	const modelSource = value.trim();
+	if (!modelSource) throw new Error("PI_KNOWLEDGE_RERANKER requires a model id or URL");
+	const resolved = resolveHfModel(modelSource);
+	const revision = cleanEnv(env.PI_KNOWLEDGE_RERANKER_REVISION) ?? resolved.revision ?? DEFAULT_RERANKER_REVISION;
+	return {
+		provider: "hf",
+		model: resolved.model,
+		revision,
+		dtype: cleanEnv(env.PI_KNOWLEDGE_RERANKER_DTYPE),
+		remoteHost: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_HOST) ?? resolved.remoteHost,
+		remotePathTemplate: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE),
+	};
+}
+
+export function isHfRerankerConfig(value: unknown): value is HfRerankerConfig {
+	if (typeof value !== "object" || value === null) return false;
+	const config = value as Partial<HfRerankerConfig>;
+	return (
+		config.provider === "hf" &&
+		typeof config.model === "string" &&
+		config.model.length > 0 &&
+		typeof config.revision === "string" &&
+		config.revision.length > 0 &&
+		(config.dtype === undefined || typeof config.dtype === "string") &&
+		(config.remoteHost === undefined || typeof config.remoteHost === "string") &&
+		(config.remotePathTemplate === undefined || typeof config.remotePathTemplate === "string")
+	);
+}
+
+export function rerankerCacheKey(config: HfRerankerConfig): string {
+	return [
+		config.provider,
+		config.model,
+		config.revision,
+		config.dtype ?? "",
+		config.remoteHost ?? "",
+		config.remotePathTemplate ?? "",
+	].join("\u0000");
+}

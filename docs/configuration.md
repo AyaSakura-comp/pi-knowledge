@@ -30,6 +30,18 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
 
+## Reranker
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PI_KNOWLEDGE_RERANKER` | `Xenova/ms-marco-MiniLM-L-4-v2` | Local Hugging Face/Transformers.js cross-encoder used by `deep` mode. Accepts bare model ids, `hf:<model>`, and Hugging Face model URLs. `api:<model>` is reserved for HTTP reranker mode and is not handled by the local model worker. |
+| `PI_KNOWLEDGE_RERANKER_REVISION` | `main` | Hugging Face revision passed to Transformers.js. Explicit env value overrides a revision parsed from a model URL. |
+| `PI_KNOWLEDGE_RERANKER_DTYPE` | unset | Optional Transformers.js dtype, such as `fp32`. |
+| `PI_KNOWLEDGE_RERANKER_REMOTE_HOST` | Hugging Face host or URL-derived host | Remote artifact host for HF-compatible model repositories. Use with trusted mirrors only. |
+| `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE` | `{model}/resolve/{revision}/` | Transformers.js remote path template for HF-compatible mirrors. |
+
+Reranker settings affect query-time `deep` search only; they do not change indexed KB vectors. Offline mode sets the model worker to local-only loading, so the requested reranker must already exist in the model cache.
+
 Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
 
 API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended.

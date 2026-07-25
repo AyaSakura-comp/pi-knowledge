@@ -103,11 +103,13 @@ const output = await extractor('query: 認證流程', { pooling: 'mean', normali
 
 ## 6. Cross-Encoder Reranking (Phase 3)
 
-| 模型 | 大小 | 來源 |
-|------|------|------|
-| ms-marco-MiniLM-L-4-v2 (推薦) | ~20 MB | Xenova/ms-marco-MiniLM-L-4-v2 |
-| ms-marco-MiniLM-L-2-v2 (快) | ~10 MB | Xenova/ms-marco-MiniLM-L-2-v2 |
-| ms-marco-MiniLM-L-12-v2 (品質) | ~60 MB | Xenova/ms-marco-MiniLM-L-12-v2 |
+`deep` search uses a local Transformers.js text-classification cross-encoder after hybrid retrieval has selected candidate chunks. Configure the local artifact with `PI_KNOWLEDGE_RERANKER`; supported forms are a bare model id such as `Xenova/ms-marco-MiniLM-L-2-v2`, `hf:<model>`, or a Hugging Face model URL. `PI_KNOWLEDGE_RERANKER_REVISION`, `PI_KNOWLEDGE_RERANKER_DTYPE`, `PI_KNOWLEDGE_RERANKER_REMOTE_HOST`, and `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE` tune the artifact source. Offline mode requires the selected reranker to already be in the local cache.
+
+| 模型 | 大小 | 來源 | 取捨 |
+|------|------|------|------|
+| ms-marco-MiniLM-L-4-v2 (預設 / 推薦) | ~20 MB | Xenova/ms-marco-MiniLM-L-4-v2 | 保持現有品質/速度平衡 |
+| ms-marco-MiniLM-L-2-v2 (快) | ~10 MB | Xenova/ms-marco-MiniLM-L-2-v2 | 延遲較低，排序品質可能較弱 |
+| ms-marco-MiniLM-L-12-v2 (品質) | ~60 MB | Xenova/ms-marco-MiniLM-L-12-v2 | 品質較高，首次下載與查詢延遲較高 |
 
 ---
 

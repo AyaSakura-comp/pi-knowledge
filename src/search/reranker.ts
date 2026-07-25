@@ -1,4 +1,5 @@
 import { rerankInModelWorker } from "../model-worker-client.ts";
+import { resolveRerankerConfig } from "./reranker-config.ts";
 
 let disposeTimer: ReturnType<typeof setTimeout> | null = null;
 let disposePromise: Promise<void> | null = null;
@@ -66,9 +67,13 @@ export async function rerank(
 	signal?: AbortSignal,
 ): Promise<Array<{ chunkId: string; score: number }>> {
 	if (candidates.length === 0) return [];
+	const rerankerConfig = resolveRerankerConfig();
+	if (rerankerConfig.provider !== "hf") {
+		throw new Error("Reranker API mode is not implemented yet");
+	}
 	beginRun();
 	try {
-		return await rerankInModelWorker(query, candidates, topK, signal);
+		return await rerankInModelWorker(query, candidates, topK, rerankerConfig, signal);
 	} finally {
 		endRun();
 	}

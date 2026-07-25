@@ -4,6 +4,7 @@ import { basename, delimiter, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { getConfiguredNodePath, writeRuntimeConfig } from "./runtime-config.ts";
+import type { HfRerankerConfig } from "./search/reranker-config.ts";
 
 type WorkerResponse = {
 	id: number;
@@ -443,9 +444,10 @@ export async function rerankInModelWorker(
 	query: string,
 	candidates: RerankWorkerCandidate[],
 	topK: number,
+	reranker: HfRerankerConfig,
 	signal?: AbortSignal,
 ): Promise<Array<{ chunkId: string; score: number }>> {
-	const result = await getWorker().request({ type: "rerank", query, candidates, topK }, signal);
+	const result = await getWorker().request({ type: "rerank", query, candidates, topK, reranker }, signal);
 	if (!Array.isArray(result)) throw new Error("Invalid reranker worker response");
 	return result.map((item) => {
 		if (
