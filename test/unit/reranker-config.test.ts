@@ -66,10 +66,59 @@ describe("reranker config", () => {
 		});
 	});
 
-	it("parses API mode without enabling it in the local worker", () => {
+	it("parses API mode with provider defaults and endpoint fallback", () => {
 		const config = resolveRerankerConfig({ PI_KNOWLEDGE_RERANKER: "api:jina-reranker-v2-base-multilingual" });
 
-		expect(config).toEqual({ provider: "api", model: "jina-reranker-v2-base-multilingual" });
+		expect(config).toMatchObject({
+			provider: "api",
+			model: "jina-reranker-v2-base-multilingual",
+			endpoint: "https://api.cohere.com/v2/rerank",
+			format: "cohere",
+			timeoutMs: 30_000,
+			maxDocumentChars: 12_000,
+			resultsPath: "results",
+			indexField: "index",
+			scoreField: "relevance_score",
+			scoreDirection: "desc",
+		});
+	});
+
+	it("parses custom API endpoint and mapping values", () => {
+		const config = resolveRerankerConfig({
+			PI_KNOWLEDGE_RERANKER: "api:rerank-v1",
+			PI_KNOWLEDGE_RERANKER_API_BASE_URL: "http://127.0.0.1:8080/v1",
+			PI_KNOWLEDGE_RERANKER_API_KEY: "test-key",
+			PI_KNOWLEDGE_RERANKER_API_FORMAT: "custom-json",
+			PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS: "5000",
+			PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS: "200",
+			PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH: "data.rankings",
+			PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD: "document_index",
+			PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD: "score",
+			PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION: "asc",
+		});
+
+		expect(config).toMatchObject({
+			provider: "api",
+			model: "rerank-v1",
+			endpoint: "http://127.0.0.1:8080/v1/rerank",
+			apiKey: "test-key",
+			format: "custom-json",
+			timeoutMs: 5000,
+			maxDocumentChars: 200,
+			resultsPath: "data.rankings",
+			indexField: "document_index",
+			scoreField: "score",
+			scoreDirection: "asc",
+		});
+	});
+
+	it("rejects non-HTTP API endpoints", () => {
+		expect(() =>
+			resolveRerankerConfig({
+				PI_KNOWLEDGE_RERANKER: "api:rerank-v1",
+				PI_KNOWLEDGE_RERANKER_API_ENDPOINT: "file:///tmp/rerank.json",
+			}),
+		).toThrow("Unsupported reranker API endpoint protocol: file:");
 	});
 
 	it("builds stable cache keys from every local model-loading field", () => {

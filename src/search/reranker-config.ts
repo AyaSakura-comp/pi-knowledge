@@ -1,4 +1,6 @@
 export type RerankerProvider = "hf" | "api";
+export type ApiRerankerFormat = "cohere" | "jina" | "custom-json";
+export type ApiScoreDirection = "desc" | "asc";
 
 export interface HfRerankerConfig {
 	provider: "hf";
@@ -12,6 +14,15 @@ export interface HfRerankerConfig {
 export interface ApiRerankerConfig {
 	provider: "api";
 	model: string;
+	endpoint: string;
+	apiKey?: string;
+	format: ApiRerankerFormat;
+	timeoutMs: number;
+	maxDocumentChars: number;
+	resultsPath: string;
+	indexField: string;
+	scoreField: string;
+	scoreDirection: ApiScoreDirection;
 }
 
 export type RerankerConfig = HfRerankerConfig | ApiRerankerConfig;
@@ -20,6 +31,8 @@ export const DEFAULT_RERANKER_MODEL = "Xenova/ms-marco-MiniLM-L-4-v2";
 export const DEFAULT_RERANKER_REVISION = "main";
 export const DEFAULT_RERANKER_REMOTE_HOST = "https://huggingface.co/";
 export const DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE = "{model}/resolve/{revision}/";
+export const DEFAULT_RERANKER_API_TIMEOUT_MS = 30_000;
+export const DEFAULT_RERANKER_MAX_DOC_CHARS = 12_000;
 
 function cleanEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
@@ -64,13 +77,79 @@ function resolveHfModel(raw: string): { model: string; revision?: string; remote
 	return { model: raw };
 }
 
+function parseNumber(value: string | undefined, fallback: number, min: number, max: number): number {
+	const parsed = Number(value);
+	if (!Number.isFinite(parsed)) return fallback;
+	return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+function normalizeApiFormat(value: string | undefined): ApiRerankerFormat {
+	if (value === undefined) return "cohere";
+	const normalized = value.toLowerCase();
+	if (normalized === "cohere" || normalized === "jina" || normalized === "custom-json") return normalized;
+	throw new Error(`Unsupported reranker API format: ${value}`);
+}
+
+function normalizeScoreDirection(value: string | undefined): ApiScoreDirection {
+	if (value === undefined) return "desc";
+	const normalized = value.toLowerCase();
+	if (normalized === "desc" || normalized === "asc") return normalized;
+	throw new Error(`Unsupported reranker score direction: ${value}`);
+}
+
+function endpointFromBaseUrl(baseUrl: string): string {
+	return new URL("rerank", `${baseUrl.replace(/\/+$/, "")}/`).toString();
+}
+
+function normalizeHttpUrl(raw: string): string {
+	const url = new URL(raw);
+	if (url.protocol !== "http:" && url.protocol !== "https:") {
+		throw new Error(`Unsupported reranker API endpoint protocol: ${url.protocol}`);
+	}
+	return url.toString();
+}
+
+function resolveApiRerankerConfig(model: string, env: NodeJS.ProcessEnv): ApiRerankerConfig {
+	const endpoint = normalizeHttpUrl(
+		cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_ENDPOINT) ??
+			endpointFromBaseUrl(
+				cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_BASE_URL) ??
+					cleanEnv(env.OPENAI_BASE_URL) ??
+					"https://api.cohere.com/v2",
+			),
+	);
+	return {
+		provider: "api",
+		model,
+		endpoint,
+		apiKey: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_KEY) ?? cleanEnv(env.OPENAI_API_KEY),
+		format: normalizeApiFormat(cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_FORMAT)),
+		timeoutMs: parseNumber(
+			cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS),
+			DEFAULT_RERANKER_API_TIMEOUT_MS,
+			1_000,
+			300_000,
+		),
+		maxDocumentChars: parseNumber(
+			cleanEnv(env.PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS),
+			DEFAULT_RERANKER_MAX_DOC_CHARS,
+			100,
+			200_000,
+		),
+		resultsPath: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH) ?? "results",
+		indexField: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD) ?? "index",
+		scoreField: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD) ?? "relevance_score",
+		scoreDirection: normalizeScoreDirection(cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION)),
+	};
+}
+
 export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): RerankerConfig {
 	const raw = cleanEnv(env.PI_KNOWLEDGE_RERANKER) ?? `hf:${DEFAULT_RERANKER_MODEL}`;
 	const { provider, value } = stripProviderPrefix(raw);
 	if (provider === "api") {
 		const model = value.trim();
 		if (!model) throw new Error("PI_KNOWLEDGE_RERANKER=api:<model> requires a model name");
-		return { provider: "api", model };
+		return resolveApiRerankerConfig(model, env);
 	}
 	if (provider !== undefined && provider !== "hf") throw new Error(`Unsupported reranker provider: ${provider}`);
 	const modelSource = value.trim();

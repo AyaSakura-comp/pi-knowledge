@@ -34,13 +34,23 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PI_KNOWLEDGE_RERANKER` | `Xenova/ms-marco-MiniLM-L-4-v2` | Local Hugging Face/Transformers.js cross-encoder used by `deep` mode. Accepts bare model ids, `hf:<model>`, and Hugging Face model URLs. `api:<model>` is reserved for HTTP reranker mode and is not handled by the local model worker. |
-| `PI_KNOWLEDGE_RERANKER_REVISION` | `main` | Hugging Face revision passed to Transformers.js. Explicit env value overrides a revision parsed from a model URL. |
-| `PI_KNOWLEDGE_RERANKER_DTYPE` | unset | Optional Transformers.js dtype, such as `fp32`. |
+| `PI_KNOWLEDGE_RERANKER` | `Xenova/ms-marco-MiniLM-L-4-v2` | Reranker used by `deep` mode. Accepts local/HF forms (`<model>`, `hf:<model>`, Hugging Face model URLs) or `api:<model>` for an external HTTP rerank service. |
+| `PI_KNOWLEDGE_RERANKER_REVISION` | `main` | Hugging Face revision passed to Transformers.js for local/HF rerankers. Explicit env value overrides a revision parsed from a model URL. |
+| `PI_KNOWLEDGE_RERANKER_DTYPE` | unset | Optional Transformers.js dtype, such as `fp32`, for local/HF rerankers. |
 | `PI_KNOWLEDGE_RERANKER_REMOTE_HOST` | Hugging Face host or URL-derived host | Remote artifact host for HF-compatible model repositories. Use with trusted mirrors only. |
 | `PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE` | `{model}/resolve/{revision}/` | Transformers.js remote path template for HF-compatible mirrors. |
+| `PI_KNOWLEDGE_RERANKER_API_ENDPOINT` | derived from base URL | Full HTTP rerank endpoint. Takes precedence over `PI_KNOWLEDGE_RERANKER_API_BASE_URL` and `OPENAI_BASE_URL`. |
+| `PI_KNOWLEDGE_RERANKER_API_BASE_URL` | `https://api.cohere.com/v2` | Base URL for Cohere/Jina-compatible `/rerank` APIs. `OPENAI_BASE_URL` is accepted only as a convenience fallback for gateways exposing the same schema. |
+| `PI_KNOWLEDGE_RERANKER_API_KEY` | `OPENAI_API_KEY` fallback | Bearer token for API rerankers. Omit only for trusted local services that do not require auth. |
+| `PI_KNOWLEDGE_RERANKER_API_FORMAT` | `cohere` | Request/response preset: `cohere`, `jina`, or `custom-json`. All presets send `model`, `query`, `documents`, `top_n`, and `return_documents:false`. |
+| `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS` | `30000` | Per-request timeout for API reranking. |
+| `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS` | `12000` | Per-candidate document safety cap before sending content to the API. |
+| `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH` | `results` | Dot path to the result array for `custom-json` or compatible responses. |
+| `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD` | `index` | Field name or dot path holding the original candidate index. |
+| `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD` | `relevance_score` | Field name or dot path holding the rerank score. |
+| `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` | `desc` | Sort direction for returned scores: `desc` when higher is better, `asc` when lower is better. |
 
-Reranker settings affect query-time `deep` search only; they do not change indexed KB vectors. Offline mode sets the model worker to local-only loading, so the requested reranker must already exist in the model cache.
+Reranker settings affect query-time `deep` search only; they do not change indexed KB vectors. Local/HF rerankers run in the isolated model worker. Offline mode sets the model worker to local-only loading, so a local/HF reranker must already exist in the model cache. API rerankers send the query and selected candidate chunk content to the configured external service; failures surface by default and do not silently fall back to the local worker.
 
 Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
 

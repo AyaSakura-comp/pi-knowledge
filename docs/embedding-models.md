@@ -111,6 +111,8 @@ const output = await extractor('query: 認證流程', { pooling: 'mean', normali
 | ms-marco-MiniLM-L-2-v2 (快) | ~10 MB | Xenova/ms-marco-MiniLM-L-2-v2 | 延遲較低，排序品質可能較弱 |
 | ms-marco-MiniLM-L-12-v2 (品質) | ~60 MB | Xenova/ms-marco-MiniLM-L-12-v2 | 品質較高，首次下載與查詢延遲較高 |
 
+For external reranking, set `PI_KNOWLEDGE_RERANKER=api:<model>` plus `PI_KNOWLEDGE_RERANKER_API_ENDPOINT` or `PI_KNOWLEDGE_RERANKER_API_BASE_URL`. API mode sends only the query and the current deep-search candidate chunk texts, not the full KB. Cohere/Jina-compatible `/rerank` responses are supported by default; `custom-json` can map a different `results` array, candidate index field, and score field without executing user callback code.
+
 ---
 
 ## 7. 備選方案
