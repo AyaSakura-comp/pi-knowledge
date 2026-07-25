@@ -63,10 +63,16 @@ function configureTransformersEnv(env: TransformersEnv): void {
 	}
 }
 
+function configureEmbeddingTransformersEnv(env: TransformersEnv): void {
+	configureTransformersEnv(env);
+	env.remoteHost = DEFAULT_RERANKER_REMOTE_HOST;
+	env.remotePathTemplate = DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE;
+}
+
 async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 	if (embeddingPipeline) return embeddingPipeline;
 	const { pipeline, env } = await import("@huggingface/transformers");
-	configureTransformersEnv(env as TransformersEnv);
+	configureEmbeddingTransformersEnv(env as TransformersEnv);
 	const createPipeline = pipeline as PipelineFactory;
 	const loaded = (await createPipeline("feature-extraction", "Xenova/multilingual-e5-small", {
 		quantized: true,

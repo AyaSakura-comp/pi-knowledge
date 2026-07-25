@@ -130,10 +130,11 @@ describe("embedding provider", () => {
 		);
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 
-		const { embedQuery } = await import("../../src/embedding/provider.ts");
-		const vector = await embedQuery("hello");
+		const { embedQueryWithConfig } = await import("../../src/embedding/provider.ts");
+		const { vector, config } = await embedQueryWithConfig("hello");
 
 		expect(vector).toEqual(new Float32Array([0.5, 0.5]));
+		expect(config.provider).toBe("local");
 		expect(workerMock.embedInModelWorker).toHaveBeenCalledOnce();
 		expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("falling back to local model"));
 	});
@@ -141,6 +142,7 @@ describe("embedding provider", () => {
 	it("builds stable embedding signatures without storing API keys", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:text-embedding-3-small");
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://internal.example/v1");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_MAX_CHARS", "12345");
 		vi.stubEnv("OPENAI_API_KEY", "secret-key");
 
 		const { embeddingSignature, resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
@@ -148,6 +150,7 @@ describe("embedding provider", () => {
 
 		expect(signature).toContain("openai:text-embedding-3-small");
 		expect(signature).toContain("dim=1536");
+		expect(signature).toContain("apiMax=12345");
 		expect(signature).toContain("base-sha256=");
 		expect(signature).not.toContain("secret-key");
 		expect(signature).not.toContain("internal.example");

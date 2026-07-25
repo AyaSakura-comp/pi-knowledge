@@ -379,6 +379,29 @@ describe("KnowledgeEngine", () => {
 			}
 		});
 
+		it("rebuilds unchanged vectors when legacy embedding signature metadata is missing", async () => {
+			const filePath = join(TEST_DIR, "legacy-signature.txt");
+			writeFileSync(filePath, "LegacySignatureToken content about vector metadata compatibility.");
+			await engine.add(filePath, "Legacy Signature");
+			const [{ id }] = engine.list();
+			const db = openDatabase(TEST_DIR);
+			try {
+				updateKBEmbeddingMetadata(db, id, "multilingual-e5-small", null, null);
+			} finally {
+				db.close();
+			}
+
+			const updates: string[] = [];
+			const result = await engine.update("Legacy Signature", (message) => updates.push(message));
+			const [kb] = engine.list();
+
+			expect(result.added).toBe(1);
+			expect(result.removed).toBe(1);
+			expect(updates).toContain('Embedding metadata changed or missing for "Legacy Signature"; rebuilding all vectors');
+			expect(kb.embedding_signature).toContain("local:multilingual-e5-small");
+			expect(kb.embedding_dimension).toBe(384);
+		});
+
 		it("coalesces overlapping updates for the same knowledge base", async () => {
 			const filePath = join(TEST_DIR, "coalesce.txt");
 			mkdirSync(TEST_DIR, { recursive: true });

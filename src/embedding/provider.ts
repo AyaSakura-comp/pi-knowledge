@@ -30,6 +30,17 @@ const IDLE_TIMEOUT_MS = Number(process.env.PI_KNOWLEDGE_EMBEDDING_IDLE_MS ?? 30_
 const ENABLE_NATIVE_IDLE_DISPOSE = process.env.PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE === "true";
 const API_FALLBACK_TO_LOCAL = process.env.PI_KNOWLEDGE_EMBEDDING_API_FALLBACK === "local";
 
+function localEmbeddingConfig(maxChars: number): EmbeddingConfig {
+	return {
+		provider: "local",
+		model: DEFAULT_LOCAL_EMBEDDING_MODEL,
+		maxChars,
+		queryPrefix: "query",
+		documentPrefix: "passage",
+		pooling: "mean",
+		normalize: true,
+	};
+}
 function cleanEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
@@ -85,15 +96,7 @@ export function resolveEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Em
 		if (localModel !== DEFAULT_LOCAL_EMBEDDING_MODEL) {
 			throw new Error(`Unsupported local embedding model: ${localModel}`);
 		}
-		return {
-			provider: "local",
-			model: localModel,
-			maxChars,
-			queryPrefix: "query",
-			documentPrefix: "passage",
-			pooling: "mean",
-			normalize: true,
-		};
+		return localEmbeddingConfig(maxChars);
 	}
 	if (provider === "openai") {
 		return {
@@ -120,6 +123,7 @@ export function embeddingSignature(config: EmbeddingConfig, dimension: number): 
 	return [
 		`${config.provider}:${config.model}${base}`,
 		`dim=${dimension}`,
+		`apiMax=${config.provider === "openai" ? config.maxChars : "none"}`,
 		`pooling=${config.pooling}`,
 		`normalize=${config.normalize}`,
 		`q=${config.queryPrefix}`,
@@ -172,36 +176,54 @@ async function embedViaAPI(
 	return data.data.map((d) => new Float32Array(d.embedding));
 }
 
-export async function embedTexts(
+export async function embedTextsWithConfig(
 	texts: string[],
 	prefix: EmbeddingPrefix,
 	signal?: AbortSignal,
 	options: { allowApiFallback?: boolean } = {},
-): Promise<Float32Array[]> {
+): Promise<{ vectors: Float32Array[]; config: EmbeddingConfig }> {
 	const config = resolveEmbeddingConfig();
+	let actualConfig = config;
 	if (config.provider === "openai") {
 		if (signal?.aborted) throw new Error("Cancelled");
 		try {
-			return await embedViaAPI(texts, prefix, config, signal);
+			return { vectors: await embedViaAPI(texts, prefix, config, signal), config };
 		} catch (error) {
 			if (signal?.aborted || isAbortError(error)) throw new Error("Cancelled");
 			if (!API_FALLBACK_TO_LOCAL || !options.allowApiFallback) throw error;
 			console.warn(
 				`pi-knowledge: embedding API failed; falling back to local model because PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local (${error instanceof Error ? error.message : String(error)})`,
 			);
+			actualConfig = localEmbeddingConfig(config.maxChars);
 		}
 	}
 	beginRun();
 	try {
-		return await embedInModelWorker(texts, prefix, signal);
+		return { vectors: await embedInModelWorker(texts, prefix, signal), config: actualConfig };
 	} finally {
 		endRun();
 	}
 }
 
+export async function embedTexts(
+	texts: string[],
+	prefix: EmbeddingPrefix,
+	signal?: AbortSignal,
+	options: { allowApiFallback?: boolean } = {},
+): Promise<Float32Array[]> {
+	return (await embedTextsWithConfig(texts, prefix, signal, options)).vectors;
+}
+
+export async function embedQueryWithConfig(
+	text: string,
+	signal?: AbortSignal,
+): Promise<{ vector: Float32Array; config: EmbeddingConfig }> {
+	const { vectors, config } = await embedTextsWithConfig([text], "query", signal, { allowApiFallback: true });
+	return { vector: vectors[0], config };
+}
+
 export async function embedQuery(text: string, signal?: AbortSignal): Promise<Float32Array> {
-	const [vec] = await embedTexts([text], "query", signal, { allowApiFallback: true });
-	return vec;
+	return (await embedQueryWithConfig(text, signal)).vector;
 }
 
 export async function embedDocuments(texts: string[], signal?: AbortSignal): Promise<Float32Array[]> {

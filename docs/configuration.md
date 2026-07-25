@@ -30,7 +30,7 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
 
-Each KB stores the embedding model label, vector dimension, and a non-secret embedding signature that includes provider/model semantics, query/document prefixes, pooling, normalization, and a hash of the API base URL when applicable. `knowledge_search` skips vector retrieval for KBs whose stored signature or dimension is incompatible with the current query embedding and uses BM25-only fallback for hybrid searches. Run `knowledge_update` to rebuild vectors after changing embedding provider/model settings.
+Each KB stores the embedding model label, vector dimension, and a non-secret embedding signature that includes provider/model semantics, query/document prefixes, pooling, normalization, API input cap, and a hash of the API base URL when applicable. `knowledge_search` skips vector retrieval for KBs whose stored signature or dimension is missing or incompatible with the current query embedding and uses BM25-only fallback for hybrid searches. Run `knowledge_update` to rebuild vectors after changing embedding provider/model/max-character settings or after upgrading older KBs with no signature metadata.
 
 ## Reranker
 

@@ -8,7 +8,7 @@ import {
 	embedDocuments,
 	embeddingConfigLabel,
 	embeddingSignature,
-	embedQuery,
+	embedQueryWithConfig,
 	prepareForShutdown as prepareEmbeddingForShutdown,
 	resolveEmbeddingConfig,
 } from "./embedding/provider.ts";
@@ -741,10 +741,9 @@ function embeddingMismatchWarning(kb: KnowledgeBase): string {
 }
 
 function canSearchVectors(kb: KnowledgeBase, config: EmbeddingConfig, queryDimension: number): boolean {
-	if (kb.embedding_dimension !== null && kb.embedding_dimension !== queryDimension) return false;
-	const expectedSignature = embeddingSignature(config, queryDimension);
-	if (kb.embedding_signature) return kb.embedding_signature === expectedSignature;
-	return kb.embedding_model === embeddingConfigLabel(config);
+	if (kb.embedding_signature === null || kb.embedding_dimension === null) return false;
+	if (kb.embedding_dimension !== queryDimension) return false;
+	return kb.embedding_signature === embeddingSignature(config, queryDimension);
 }
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
@@ -1179,9 +1178,8 @@ export class KnowledgeEngine {
 		const embeddingModel = embeddingConfigLabel(embeddingConfig);
 		const currentSignature =
 			kb.embedding_dimension === null ? undefined : embeddingSignature(embeddingConfig, kb.embedding_dimension);
-		const canReuseExistingVectors = kb.embedding_signature
-			? kb.embedding_signature === currentSignature
-			: kb.embedding_model === embeddingModel;
+		const canReuseExistingVectors =
+			kb.embedding_signature !== null && kb.embedding_dimension !== null && kb.embedding_signature === currentSignature;
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -1206,7 +1204,7 @@ export class KnowledgeEngine {
 				? existingHashes
 				: new Map<string, Array<{ id: string; vectorIndex: number }>>();
 			if (!canReuseExistingVectors) {
-				const message = `Embedding model changed for "${kb.name}"; rebuilding all vectors`;
+				const message = `Embedding metadata changed or missing for "${kb.name}"; rebuilding all vectors`;
 				updateIndexingJob(this.db, kb.id, { phase: "embedding", message });
 				onProgress?.(message);
 			}
@@ -1558,17 +1556,9 @@ export class KnowledgeEngine {
 
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
-		const searchEmbeddingConfig = resolveEmbeddingConfig();
 
 		for (const kb of kbs) {
 			throwIfAborted(signal);
-			if (kb.embedding_model !== embeddingConfigLabel(searchEmbeddingConfig)) {
-				warnings.push(
-					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${embeddingConfigLabel(
-						searchEmbeddingConfig,
-					)}) — run knowledge_update for best results`,
-				);
-			}
 			if (kb.chunk_count === 0) continue;
 			const vectorPath = this.vectorPathFor(kb.id);
 
@@ -1582,9 +1572,9 @@ export class KnowledgeEngine {
 					),
 				);
 			} else if (retrievalMode === "semantic") {
-				const queryVec = await embedQuery(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
 				throwIfAborted(signal);
-				if (!canSearchVectors(kb, searchEmbeddingConfig, queryVec.length)) {
+				if (!canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					warnings.push(embeddingMismatchWarning(kb));
 					continue;
 				}
@@ -1604,9 +1594,9 @@ export class KnowledgeEngine {
 				if (bm25Results.length === 0) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
-				const queryVec = await embedQuery(query, signal);
+				const { vector: queryVec, config: queryEmbeddingConfig } = await embedQueryWithConfig(query, signal);
 				throwIfAborted(signal);
-				if (canSearchVectors(kb, searchEmbeddingConfig, queryVec.length)) {
+				if (canSearchVectors(kb, queryEmbeddingConfig, queryVec.length)) {
 					const vectorResults = searchVectorFile(
 						queryVec,
 						vectorPath,

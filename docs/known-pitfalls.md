@@ -233,7 +233,7 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 
 穩定性要求:
 
-- 每個 KB 必須持久化 embedding model label、vector dimension、以及不含 secret 的 embedding signature。signature 至少要反映 provider/model、API base URL hash、query/document prefix、pooling、normalize 與 dimension。
+- 每個 KB 必須持久化 embedding model label、vector dimension、以及不含 secret 的 embedding signature。signature 至少要反映 provider/model、API base URL hash、query/document prefix、pooling、normalize、API input cap 與 dimension。
 - add/update/import 的 document embedding API failure 不得 silent fallback 到 local。使用者明確設定 fallback 也只能用於 query-time degradation，不能用於產生 KB vectors。
 - `knowledge_update` 發現目前 embedding signature 與 KB metadata 不相容時，不能重用 unchanged chunk 的舊 vectors，必須完整重建 vectors。
 - `knowledge_search` 在 semantic/hybrid vector retrieval 前要檢查 KB signature/dimension。相容才可讀 vector file；不相容時 hybrid 可退回 BM25-only 並明確 warning，semantic 不可拿錯向量空間硬搜。

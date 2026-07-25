@@ -166,9 +166,9 @@ export OPENAI_API_KEY=local-placeholder
 
 API embedding failures are surfaced by default so configuration and context-window problems are visible. To explicitly allow query-time local fallback after API failures, set `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK=local`; indexing/import/update document batches still fail instead of creating mixed-provider vector files.
 
-API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window.
+API embedding requests are capped at 20000 characters per input by default as a final context-window safety guard for OpenAI-compatible servers. Adjust this with `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` when your embedding model has a different context window; changing the cap changes embedding compatibility and requires `knowledge_update`.
 
-Stored KB metadata includes the embedding model, vector dimension, and a non-secret embedding signature. If the current query embedding is incompatible with a KB's stored vectors, `knowledge_search` skips vector retrieval for that KB and reports a warning; run `knowledge_update` after changing embedding providers.
+Stored KB metadata includes the embedding model, vector dimension, and a non-secret embedding signature. If the current query embedding is incompatible with a KB's stored vectors, or if an older KB has no signature metadata, `knowledge_search` skips vector retrieval for that KB and reports a warning; run `knowledge_update` after changing embedding providers or upgrading older KBs.
 
 ## Configuration
 
