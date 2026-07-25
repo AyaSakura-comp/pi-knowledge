@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] - 2026-07-25
+
+### Added
+- Added configurable local/Hugging Face reranker selection through `PI_KNOWLEDGE_RERANKER`, including revision, dtype, and trusted mirror settings.
+- Added API reranker support for `deep` search with Cohere/Jina-compatible requests and declarative custom JSON response mapping.
+- Added embedding metadata signatures and dimensions so knowledge bases can detect incompatible vector spaces after provider, API base URL, preprocessing, or dimension changes.
+
+### Changed
+- Document embedding batches now surface OpenAI-compatible API failures instead of falling back to local embeddings during add, update, or import, preventing mixed-provider vector files.
+- `knowledge_search` skips incompatible or legacy unsigned vectors with warnings, while hybrid search can fall back to BM25-only results until `knowledge_update` rebuilds vectors.
+
+### Fixed
+- Rebuilds unchanged chunks during `knowledge_update` when embedding metadata is missing or incompatible, rather than reusing stale vectors.
+- Resets Transformers.js remote model settings before embedding loads so custom reranker mirrors do not affect the embedding pipeline.
+
 ## [0.5.6] - 2026-07-23
 
 ### Added
