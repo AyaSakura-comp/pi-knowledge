@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KnowledgeEngine } from "../../src/engine.ts";
-import { getChunksByKB, getIndexingJob, openDatabase } from "../../src/storage/sqlite.ts";
+import { getChunksByKB, getIndexingJob, openDatabase, updateKBEmbeddingMetadata } from "../../src/storage/sqlite.ts";
 
 const mammothMock = vi.hoisted(() => ({
 	extractRawText: vi.fn(),
@@ -48,6 +48,40 @@ describe("KnowledgeEngine", () => {
 			const r1 = await engine.search("test", { mode: "fast" });
 			const r2 = await engine.search("test", { mode: "fast" });
 			expect(r1.total_count).toBe(r2.total_count);
+		});
+
+		it("persists embedding signature metadata for indexed KB vectors", async () => {
+			await engine.add("Embedding metadata protects vector compatibility during search.", "EmbeddingMetadata");
+			const [kb] = engine.list();
+
+			expect(kb.embedding_model).toBe("multilingual-e5-small");
+			expect(kb.embedding_dimension).toBe(384);
+			expect(kb.embedding_signature).toContain("local:multilingual-e5-small");
+			expect(kb.embedding_signature).toContain("dim=384");
+		});
+
+		it("skips vector retrieval for incompatible embedding signatures", async () => {
+			await engine.add("OAuth token compatibility search should still have lexical evidence.", "IncompatibleVectors");
+			const [kb] = engine.list();
+			const db = openDatabase(TEST_DIR);
+			try {
+				updateKBEmbeddingMetadata(
+					db,
+					kb.id,
+					"openai:text-embedding-3-small",
+					"openai:text-embedding-3-small:dim=1536",
+					1536,
+				);
+			} finally {
+				db.close();
+			}
+
+			const hybrid = await engine.search("OAuth token", { mode: "hybrid" });
+			expect(hybrid.total_count).toBeGreaterThan(0);
+			expect(hybrid.warnings?.join("\n")).toContain("vector retrieval was skipped");
+			const semantic = await engine.search("OAuth token", { mode: "semantic" });
+			expect(semantic.total_count).toBe(0);
+			expect(semantic.warnings?.join("\n")).toContain("vector retrieval was skipped");
 		});
 
 		it("remove invalidates cache", async () => {

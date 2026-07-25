@@ -25,10 +25,12 @@ Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under 
 | `PI_KNOWLEDGE_EMBEDDING_BASE_URL` | unset | OpenAI-compatible embedding API root, such as `http://127.0.0.1:8080/v1`. Takes precedence over `OPENAI_BASE_URL`. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Common OpenAI-compatible API root fallback. |
 | `PI_KNOWLEDGE_EMBEDDING_MAX_CHARS` | `20000` | Final per-input API embedding safety cap for OpenAI-compatible servers with smaller context windows. This does not replace chunker bounds. |
-| `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` | unset | Set to `local` to explicitly fall back to local embeddings after API failures. Without this, API failures are surfaced. |
+| `PI_KNOWLEDGE_EMBEDDING_API_FALLBACK` | unset | Set to `local` to explicitly fall back to local embeddings for query embeddings after API failures. Indexing/import/update document batches do not fall back because mixed-provider vector files are unsafe. |
 | `PI_KNOWLEDGE_ENABLE_NATIVE_IDLE_DISPOSE` | unset | Enables idle timers for embedding/reranker run coordination. It does not guarantee immediate worker memory release; model-worker shutdown remains tied to engine/session shutdown. Disabled by default for stable shutdown. |
 | `PI_KNOWLEDGE_EMBEDDING_IDLE_MS` | `30000` | Idle timer used only when native idle disposal coordination is enabled. Mainly for lifecycle stress tests. |
 | `PI_KNOWLEDGE_OFFLINE` | unset | Use with a pre-populated model cache for offline local model operation. See `docs/offline-mode.md`. |
+
+Each KB stores the embedding model label, vector dimension, and a non-secret embedding signature that includes provider/model semantics, query/document prefixes, pooling, normalization, and a hash of the API base URL when applicable. `knowledge_search` skips vector retrieval for KBs whose stored signature or dimension is incompatible with the current query embedding and uses BM25-only fallback for hybrid searches. Run `knowledge_update` to rebuild vectors after changing embedding provider/model settings.
 
 ## Reranker
 
@@ -54,7 +56,7 @@ Reranker settings affect query-time `deep` search only; they do not change index
 
 Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
 
-API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended.
+API embedding failures intentionally surface by default. Silent fallback can hide bad API keys, wrong base URLs, unsupported model names, or context-window errors and can produce a KB with a different embedding model than intended. Query-time fallback is opt-in; indexing fallback is disabled to prevent mixed vector spaces in one KB.
 
 ## Runtime Features and Diagnostics
 

@@ -1,7 +1,15 @@
-import { homedir } from "node:os";
+import { mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getDefaultKnowledgeDir, resolveHostKnowledgeDir } from "../../src/storage/sqlite.ts";
+import {
+	createKB,
+	getDefaultKnowledgeDir,
+	getKB,
+	openDatabase,
+	resolveHostKnowledgeDir,
+	updateKBEmbeddingMetadata,
+} from "../../src/storage/sqlite.ts";
 
 describe("knowledge storage path", () => {
 	afterEach(() => {
@@ -62,5 +70,45 @@ describe("knowledge storage path", () => {
 		vi.stubEnv("OMP_KNOWLEDGE_DIR", "");
 
 		expect(getDefaultKnowledgeDir()).toMatch(/[/\\]\.pi[/\\]knowledge$/);
+	});
+});
+
+describe("knowledge base embedding metadata", () => {
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("stores embedding signatures and dimensions on knowledge bases", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pk-storage-"));
+		tempDirs.push(dir);
+		const db = openDatabase(dir);
+		try {
+			const kb = createKB(db, {
+				name: "repo",
+				source_type: "text",
+				embedding_model: "openai:text-embedding-3-small",
+				embedding_signature: "openai:text-embedding-3-small:dim=1536",
+				embedding_dimension: 1536,
+			});
+
+			expect(kb.embedding_model).toBe("openai:text-embedding-3-small");
+			expect(kb.embedding_signature).toBe("openai:text-embedding-3-small:dim=1536");
+			expect(kb.embedding_dimension).toBe(1536);
+
+			updateKBEmbeddingMetadata(db, kb.id, "multilingual-e5-small", "local:dim=384", 384);
+			const updated = getKB(db, kb.id);
+			expect(updated?.embedding_model).toBe("multilingual-e5-small");
+			expect(updated?.embedding_signature).toBe("local:dim=384");
+			expect(updated?.embedding_dimension).toBe(384);
+
+			const defaulted = createKB(db, { name: "other", source_type: "text" });
+			expect(defaulted.embedding_model).toBe("multilingual-e5-small");
+			expect(defaulted.embedding_signature).toBeNull();
+			expect(defaulted.embedding_dimension).toBeNull();
+		} finally {
+			db.close();
+		}
 	});
 });

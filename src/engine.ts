@@ -2,11 +2,15 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, type WriteStrea
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { type DiagnosticResult, diagnoseKB } from "./diagnostics/health.ts";
+import type { EmbeddingConfig } from "./embedding/provider.ts";
 import {
 	dispose as disposeEmbedding,
 	embedDocuments,
+	embeddingConfigLabel,
+	embeddingSignature,
 	embedQuery,
 	prepareForShutdown as prepareEmbeddingForShutdown,
+	resolveEmbeddingConfig,
 } from "./embedding/provider.ts";
 import { openVectorReader, openVectorWriter } from "./embedding/vectors.ts";
 import {
@@ -72,6 +76,7 @@ import {
 	startIndexingJob,
 	updateIndexingJob,
 	updateKBCounts,
+	updateKBEmbeddingMetadata,
 	updateKBStatus,
 } from "./storage/sqlite.ts";
 
@@ -119,7 +124,7 @@ export interface SearchResult {
 	};
 }
 
-export const CURRENT_EMBEDDING_MODEL = "multilingual-e5-small";
+export { CURRENT_EMBEDDING_MODEL } from "./embedding/provider.ts";
 
 export interface SearchResponse {
 	results: SearchResult[];
@@ -718,6 +723,29 @@ async function extractScannableFileContentOrSkip(
 	}
 }
 
+function persistEmbeddingMetadata(
+	db: Database.Database,
+	kbId: string,
+	config: EmbeddingConfig,
+	vectors: Float32Array[],
+): number | undefined {
+	const firstVector = vectors[0];
+	if (!firstVector) return undefined;
+	const dimension = firstVector.length;
+	updateKBEmbeddingMetadata(db, kbId, embeddingConfigLabel(config), embeddingSignature(config, dimension), dimension);
+	return dimension;
+}
+
+function embeddingMismatchWarning(kb: KnowledgeBase): string {
+	return `"${kb.name}" has incompatible embedding metadata; vector retrieval was skipped and knowledge_update should rebuild it`;
+}
+
+function canSearchVectors(kb: KnowledgeBase, config: EmbeddingConfig, queryDimension: number): boolean {
+	if (kb.embedding_dimension !== null && kb.embedding_dimension !== queryDimension) return false;
+	const expectedSignature = embeddingSignature(config, queryDimension);
+	if (kb.embedding_signature) return kb.embedding_signature === expectedSignature;
+	return kb.embedding_model === embeddingConfigLabel(config);
+}
 function throwIfAborted(signal?: AbortSignal): void {
 	if (signal?.aborted) throw new Error("Cancelled");
 }
@@ -901,11 +929,13 @@ export class KnowledgeEngine {
 			);
 		}
 
+		const embeddingConfig = resolveEmbeddingConfig();
 		const kb = createKB(db, {
 			name,
 			source_path: isDir || isFile ? resolvedSource : isUrl ? source : undefined,
 			source_type: sourceType,
 			source_options: serializeAddOptions(options),
+			embedding_model: embeddingConfigLabel(embeddingConfig),
 		});
 		updateKBStatus(db, kb.id, "indexing");
 		startIndexingJob(db, kb.id, "add", `Starting indexing for "${name}"`);
@@ -966,6 +996,7 @@ export class KnowledgeEngine {
 					signal,
 				);
 				if (signal?.aborted) throw new Error("Cancelled");
+				persistEmbeddingMetadata(db, kb.id, embeddingConfig, vectors);
 				insertChunks(db, kb.id, batch);
 				writer.append(vectors);
 				chunkCount += batch.length;
@@ -1144,6 +1175,13 @@ export class KnowledgeEngine {
 		updateKBStatus(this.db, kb.id, "indexing");
 		startIndexingJob(this.db, kb.id, "update", `Starting update for "${kb.name}"`);
 		const scanOptions = toScanOptions(parseAddOptions(kb.source_options));
+		const embeddingConfig = resolveEmbeddingConfig();
+		const embeddingModel = embeddingConfigLabel(embeddingConfig);
+		const currentSignature =
+			kb.embedding_dimension === null ? undefined : embeddingSignature(embeddingConfig, kb.embedding_dimension);
+		const canReuseExistingVectors = kb.embedding_signature
+			? kb.embedding_signature === currentSignature
+			: kb.embedding_model === embeddingModel;
 		let replacementVectorPath: string | undefined;
 		let addedVectorPath: string | undefined;
 		let addedVectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -1164,6 +1202,14 @@ export class KnowledgeEngine {
 				existingHashes.set(chunk.content_hash, entries);
 				existingIndex++;
 			}
+			const reusableHashes = canReuseExistingVectors
+				? existingHashes
+				: new Map<string, Array<{ id: string; vectorIndex: number }>>();
+			if (!canReuseExistingVectors) {
+				const message = `Embedding model changed for "${kb.name}"; rebuilding all vectors`;
+				updateIndexingJob(this.db, kb.id, { phase: "embedding", message });
+				onProgress?.(message);
+			}
 
 			const oldVectorIndexByHash = new Map<string, number[]>();
 			const newVectorIndexByHash = new Map<string, number[]>();
@@ -1174,6 +1220,7 @@ export class KnowledgeEngine {
 			let scannedFiles = 0;
 			let scannedChunks = 0;
 			let plannedTotalFiles: number | undefined;
+			let finalEmbeddingDimension: number | undefined;
 			const startedAt = Date.now();
 
 			const flushPending = async (): Promise<void> => {
@@ -1225,7 +1272,7 @@ export class KnowledgeEngine {
 			const processChunks = async (chunks: Awaited<ReturnType<typeof chunkFile>>): Promise<void> => {
 				for (const chunk of chunks) {
 					scannedChunks++;
-					const existing = existingHashes.get(chunk.content_hash);
+					const existing = reusableHashes.get(chunk.content_hash);
 					if (existing && existing.length > 0) {
 						const retained = existing.shift();
 						if (retained) {
@@ -1352,6 +1399,7 @@ export class KnowledgeEngine {
 								? newVectorReader.read(newVectorIndex)
 								: undefined;
 					if (!vector) throw new Error(`Missing vector while rebuilding knowledge base: ${chunk.id}`);
+					finalEmbeddingDimension ??= vector.length;
 					vectorWriter.append([vector]);
 					finalChunkCount++;
 					if (finalChunkCount % 1_000 === 0) {
@@ -1381,6 +1429,13 @@ export class KnowledgeEngine {
 			deleteSymbolsByKB(this.db, kb.id);
 			insertSymbols(this.db, kb.id, stagedSymbols);
 
+			updateKBEmbeddingMetadata(
+				this.db,
+				kb.id,
+				embeddingModel,
+				finalEmbeddingDimension === undefined ? null : embeddingSignature(embeddingConfig, finalEmbeddingDimension),
+				finalEmbeddingDimension ?? null,
+			);
 			updateKBCounts(this.db, kb.id, finalChunkCount, getFileCount(this.db, kb.id));
 			updateKBStatus(this.db, kb.id, "ready");
 			const skippedReadySuffix =
@@ -1503,12 +1558,15 @@ export class KnowledgeEngine {
 
 		const allResults: { chunkId: string; score: number }[] = [];
 		const vectorsByChunkId = new Map<string, Float32Array>();
+		const searchEmbeddingConfig = resolveEmbeddingConfig();
 
 		for (const kb of kbs) {
 			throwIfAborted(signal);
-			if (kb.embedding_model !== CURRENT_EMBEDDING_MODEL) {
+			if (kb.embedding_model !== embeddingConfigLabel(searchEmbeddingConfig)) {
 				warnings.push(
-					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${CURRENT_EMBEDDING_MODEL}) — run knowledge_update for best results`,
+					`"${kb.name}" was indexed with ${kb.embedding_model} (current: ${embeddingConfigLabel(
+						searchEmbeddingConfig,
+					)}) — run knowledge_update for best results`,
 				);
 			}
 			if (kb.chunk_count === 0) continue;
@@ -1526,6 +1584,10 @@ export class KnowledgeEngine {
 			} else if (retrievalMode === "semantic") {
 				const queryVec = await embedQuery(query, signal);
 				throwIfAborted(signal);
+				if (!canSearchVectors(kb, searchEmbeddingConfig, queryVec.length)) {
+					warnings.push(embeddingMismatchWarning(kb));
+					continue;
+				}
 				const vectorResults = searchVectorFile(
 					queryVec,
 					vectorPath,
@@ -1538,22 +1600,25 @@ export class KnowledgeEngine {
 				);
 				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
 			} else {
-				// hybrid: BM25 + vector weighted fusion (both scoped to this KB)
 				const bm25Results = searchBM25(db, normalizedQuery || query, candidateLimit, kb.id);
 				if (bm25Results.length === 0) continue;
 
 				let vecResults: { chunkId: string; score: number }[] = [];
 				const queryVec = await embedQuery(query, signal);
 				throwIfAborted(signal);
-				const vectorResults = searchVectorFile(
-					queryVec,
-					vectorPath,
-					iterateChunkIdsByKB(db, kb.id),
-					candidateLimit,
-					signal,
-				);
-				vecResults = vectorResults.results;
-				for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
+				if (canSearchVectors(kb, searchEmbeddingConfig, queryVec.length)) {
+					const vectorResults = searchVectorFile(
+						queryVec,
+						vectorPath,
+						iterateChunkIdsByKB(db, kb.id),
+						candidateLimit,
+						signal,
+					);
+					vecResults = vectorResults.results;
+					for (const [chunkId, vector] of vectorResults.vectorsByChunkId) vectorsByChunkId.set(chunkId, vector);
+				} else {
+					warnings.push(embeddingMismatchWarning(kb));
+				}
 				const fused = weightedScoreFusion(bm25Results, vecResults);
 				allResults.push(...fused.map((result) => ({ ...result, score: result.score * kbTrustMultiplier(kb) })));
 			}
@@ -2050,6 +2115,7 @@ export class KnowledgeEngine {
 		const { createInterface } = await import("node:readline");
 		const stream = createReadStream(inputPath, { encoding: "utf-8" });
 		const lines = createInterface({ input: stream, crlfDelay: Infinity });
+		const embeddingConfig = resolveEmbeddingConfig();
 		let header: ImportHeader | undefined;
 		let kb: KnowledgeBase | undefined;
 		let vectorWriter: ReturnType<typeof openVectorWriter> | undefined;
@@ -2079,6 +2145,7 @@ export class KnowledgeEngine {
 				signal,
 			);
 			throwIfAborted(signal);
+			persistEmbeddingMetadata(this.db, kb.id, embeddingConfig, vectors);
 			insertChunks(this.db, kb.id, batch);
 			insertSymbols(this.db, kb.id, symbols);
 			vectorWriter.append(vectors);
@@ -2108,7 +2175,12 @@ export class KnowledgeEngine {
 							`Knowledge base "${header.name}" already exists. Use knowledge_update to refresh it, or knowledge_remove before importing a replacement.`,
 						);
 					}
-					kb = createKB(this.db, { name: header.name, description: header.description, source_type: "text" });
+					kb = createKB(this.db, {
+						name: header.name,
+						description: header.description,
+						source_type: "text",
+						embedding_model: embeddingConfigLabel(embeddingConfig),
+					});
 					updateKBStatus(this.db, kb.id, "indexing");
 					startIndexingJob(this.db, kb.id, "import", `Starting import for "${header.name}"`);
 					const importMessage = `Importing ${header.chunk_count ?? "unknown"} chunks...`;

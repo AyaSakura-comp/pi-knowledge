@@ -227,6 +227,18 @@ find <project> -maxdepth 4 \( -path '*/bin/*' -o -path '*/obj/*' -o -path '*/.pl
 - `knowledge_doctor` 必須把 status/diagnostics 收斂成 health score 與 concrete actions，避免使用者看見一堆統計但不知道下一步。
 
 
+## Embedding provider changes must not mix vector spaces
+
+`PI_KNOWLEDGE_EMBEDDING` 影響 index-time document vectors 和 query-time vectors。若 add/update/import 的某些 batch 用 OpenAI-compatible API 成功、後續 batch 又因 fallback 改用 local model，同一個 KB vector file 會混入不同向量空間；搜尋時分數看似正常但語意完全不可靠。
+
+穩定性要求:
+
+- 每個 KB 必須持久化 embedding model label、vector dimension、以及不含 secret 的 embedding signature。signature 至少要反映 provider/model、API base URL hash、query/document prefix、pooling、normalize 與 dimension。
+- add/update/import 的 document embedding API failure 不得 silent fallback 到 local。使用者明確設定 fallback 也只能用於 query-time degradation，不能用於產生 KB vectors。
+- `knowledge_update` 發現目前 embedding signature 與 KB metadata 不相容時，不能重用 unchanged chunk 的舊 vectors，必須完整重建 vectors。
+- `knowledge_search` 在 semantic/hybrid vector retrieval 前要檢查 KB signature/dimension。相容才可讀 vector file；不相容時 hybrid 可退回 BM25-only 並明確 warning，semantic 不可拿錯向量空間硬搜。
+
+
 ## Cancellation boundaries must preserve unrelated work
 
 Pi/OMP 使用者取消 tool call 時，取消只應影響該次請求，不能把共享資源或既有 KB 推進失敗狀態。

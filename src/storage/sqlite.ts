@@ -18,6 +18,8 @@ export interface KnowledgeBase {
 	chunk_count: number;
 	file_count: number;
 	embedding_model: string;
+	embedding_signature: string | null;
+	embedding_dimension: number | null;
 	status: "ready" | "indexing" | "error" | "stale";
 }
 
@@ -75,7 +77,7 @@ export interface KnowledgeSymbol {
 
 export type KnowledgeSymbolInsert = Omit<KnowledgeSymbol, "id" | "kb_id" | "indexed_at" | "normalized_name">;
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const ITERATION_BATCH_SIZE = 500;
 
 const SCHEMA_SQL = `
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
   chunk_count INTEGER NOT NULL DEFAULT 0,
   file_count INTEGER NOT NULL DEFAULT 0,
   embedding_model TEXT NOT NULL DEFAULT 'multilingual-e5-small',
+  embedding_signature TEXT,
+  embedding_dimension INTEGER,
   status TEXT NOT NULL DEFAULT 'ready'
 );
 
@@ -395,6 +399,16 @@ CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(kb_id, file_path);
 `);
 			continue;
 		}
+		if (v === 5) {
+			const columns = db.prepare("PRAGMA table_info(knowledge_bases)").all() as Array<{ name: string }>;
+			if (!columns.some((column) => column.name === "embedding_signature")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN embedding_signature TEXT");
+			}
+			if (!columns.some((column) => column.name === "embedding_dimension")) {
+				db.exec("ALTER TABLE knowledge_bases ADD COLUMN embedding_dimension INTEGER");
+			}
+			continue;
+		}
 		if (migrations[v]) db.exec(migrations[v]);
 	}
 }
@@ -409,13 +423,19 @@ export function createKB(
 		source_path?: string;
 		source_type: KnowledgeBase["source_type"];
 		source_options?: string;
+		embedding_model?: string;
+		embedding_signature?: string;
+		embedding_dimension?: number;
 	},
 ): KnowledgeBase {
 	const id = randomUUID();
 	const now = Date.now();
 	db.prepare(
-		`INSERT INTO knowledge_bases (id, name, description, source_path, source_type, source_options, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO knowledge_bases (
+       id, name, description, source_path, source_type, source_options, created_at, updated_at,
+       embedding_model, embedding_signature, embedding_dimension
+     )
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		id,
 		opts.name,
@@ -425,6 +445,9 @@ export function createKB(
 		opts.source_options ?? null,
 		now,
 		now,
+		opts.embedding_model ?? "multilingual-e5-small",
+		opts.embedding_signature ?? null,
+		opts.embedding_dimension ?? null,
 	);
 	const kb = getKB(db, id);
 	if (!kb) throw new Error(`Failed to create knowledge base: ${id}`);
@@ -461,6 +484,20 @@ export function updateKBCounts(db: Database.Database, id: string, chunkCount: nu
 		Date.now(),
 		id,
 	);
+}
+
+export function updateKBEmbeddingMetadata(
+	db: Database.Database,
+	id: string,
+	embeddingModel: string,
+	embeddingSignature: string | null,
+	embeddingDimension: number | null,
+): void {
+	db.prepare(
+		`UPDATE knowledge_bases
+     SET embedding_model = ?, embedding_signature = ?, embedding_dimension = ?, updated_at = ?
+     WHERE id = ?`,
+	).run(embeddingModel, embeddingSignature, embeddingDimension, Date.now(), id);
 }
 
 // --- Indexing Jobs ---

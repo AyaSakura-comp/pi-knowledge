@@ -105,7 +105,22 @@ describe("embedding provider", () => {
 		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
 	});
 
-	it("falls back to the local worker only when explicitly requested", async () => {
+	it("does not fall back to local vectors for document indexing batches", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_FALLBACK", "local");
+		vi.stubEnv("OPENAI_API_KEY", "test-key");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("temporary failure", { status: 503 })),
+		);
+
+		const { embedDocuments } = await import("../../src/embedding/provider.ts");
+
+		await expect(embedDocuments(["hello"])).rejects.toThrow("OpenAI embedding API error: 503 temporary failure");
+		expect(workerMock.embedInModelWorker).not.toHaveBeenCalled();
+	});
+
+	it("falls back to the local worker for query embeddings only when explicitly requested", async () => {
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:custom-embedding-model");
 		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_API_FALLBACK", "local");
 		vi.stubEnv("OPENAI_API_KEY", "test-key");
@@ -115,11 +130,26 @@ describe("embedding provider", () => {
 		);
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 
-		const { embedDocuments } = await import("../../src/embedding/provider.ts");
-		const vectors = await embedDocuments(["hello"]);
+		const { embedQuery } = await import("../../src/embedding/provider.ts");
+		const vector = await embedQuery("hello");
 
-		expect(vectors[0]).toEqual(new Float32Array([0.5, 0.5]));
+		expect(vector).toEqual(new Float32Array([0.5, 0.5]));
 		expect(workerMock.embedInModelWorker).toHaveBeenCalledOnce();
 		expect(console.warn).toHaveBeenCalledWith(expect.stringContaining("falling back to local model"));
+	});
+
+	it("builds stable embedding signatures without storing API keys", async () => {
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING", "openai:text-embedding-3-small");
+		vi.stubEnv("PI_KNOWLEDGE_EMBEDDING_BASE_URL", "https://internal.example/v1");
+		vi.stubEnv("OPENAI_API_KEY", "secret-key");
+
+		const { embeddingSignature, resolveEmbeddingConfig } = await import("../../src/embedding/provider.ts");
+		const signature = embeddingSignature(resolveEmbeddingConfig(), 1536);
+
+		expect(signature).toContain("openai:text-embedding-3-small");
+		expect(signature).toContain("dim=1536");
+		expect(signature).toContain("base-sha256=");
+		expect(signature).not.toContain("secret-key");
+		expect(signature).not.toContain("internal.example");
 	});
 });
