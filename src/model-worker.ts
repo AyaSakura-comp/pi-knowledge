@@ -8,6 +8,7 @@ import {
 	rerankerCacheKey,
 	resolveRerankerConfig,
 } from "./search/reranker-config.ts";
+import { type RawLogitModel, type RawLogitTokenizer, rerankWithSingleRawLogit } from "./search/reranker-logits.ts";
 import { getDefaultKnowledgeDir } from "./storage/sqlite.ts";
 
 type FeatureExtractionPipeline = (
@@ -85,6 +86,22 @@ async function loadEmbeddingPipeline(): Promise<FeatureExtractionPipeline> {
 async function loadRerankerPipeline(config: HfRerankerConfig): Promise<RerankerPipeline> {
 	const key = rerankerCacheKey(config);
 	if (rerankerPipeline?.key === key) return rerankerPipeline.pipe;
+
+	if (config.rawLogits) {
+		const { AutoTokenizer, AutoModelForSequenceClassification, env } = await import("@huggingface/transformers");
+		const transformersEnv = env as TransformersEnv;
+		configureTransformersEnv(transformersEnv);
+		transformersEnv.remoteHost = config.remoteHost ?? DEFAULT_RERANKER_REMOTE_HOST;
+		transformersEnv.remotePathTemplate = config.remotePathTemplate ?? DEFAULT_RERANKER_REMOTE_PATH_TEMPLATE;
+		const loadOpts: Record<string, unknown> = { revision: config.revision };
+		if (config.dtype) loadOpts.dtype = config.dtype;
+		const tokenizer = (await AutoTokenizer.from_pretrained(config.model, loadOpts)) as RawLogitTokenizer;
+		const model = (await AutoModelForSequenceClassification.from_pretrained(config.model, loadOpts)) as RawLogitModel;
+		const pipe: RerankerPipeline = (input) => rerankWithSingleRawLogit(input, tokenizer, model, config.model);
+		rerankerPipeline = { key, pipe };
+		return pipe;
+	}
+
 	const { pipeline, env } = await import("@huggingface/transformers");
 	const transformersEnv = env as TransformersEnv;
 	configureTransformersEnv(transformersEnv);

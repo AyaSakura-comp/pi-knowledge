@@ -9,6 +9,9 @@ export interface HfRerankerConfig {
 	dtype?: string;
 	remoteHost?: string;
 	remotePathTemplate?: string;
+	/** When true, use raw logits from the model instead of pipeline sigmoid scores.
+	 *  Essential for cross-encoder models (e.g. bge-reranker) whose logits saturate through sigmoid. */
+	rawLogits?: boolean;
 }
 
 export interface ApiRerankerConfig {
@@ -156,6 +159,7 @@ export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): Rer
 	if (!modelSource) throw new Error("PI_KNOWLEDGE_RERANKER requires a model id or URL");
 	const resolved = resolveHfModel(modelSource);
 	const revision = cleanEnv(env.PI_KNOWLEDGE_RERANKER_REVISION) ?? resolved.revision ?? DEFAULT_RERANKER_REVISION;
+	const rawLogits = cleanEnv(env.PI_KNOWLEDGE_RERANKER_RAW_LOGITS) === "true";
 	return {
 		provider: "hf",
 		model: resolved.model,
@@ -163,6 +167,7 @@ export function resolveRerankerConfig(env: NodeJS.ProcessEnv = process.env): Rer
 		dtype: cleanEnv(env.PI_KNOWLEDGE_RERANKER_DTYPE),
 		remoteHost: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_HOST) ?? resolved.remoteHost,
 		remotePathTemplate: cleanEnv(env.PI_KNOWLEDGE_RERANKER_REMOTE_PATH_TEMPLATE),
+		...(rawLogits ? { rawLogits: true } : {}),
 	};
 }
 
@@ -177,7 +182,8 @@ export function isHfRerankerConfig(value: unknown): value is HfRerankerConfig {
 		config.revision.length > 0 &&
 		(config.dtype === undefined || typeof config.dtype === "string") &&
 		(config.remoteHost === undefined || typeof config.remoteHost === "string") &&
-		(config.remotePathTemplate === undefined || typeof config.remotePathTemplate === "string")
+		(config.remotePathTemplate === undefined || typeof config.remotePathTemplate === "string") &&
+		(config.rawLogits === undefined || typeof config.rawLogits === "boolean")
 	);
 }
 
@@ -189,5 +195,6 @@ export function rerankerCacheKey(config: HfRerankerConfig): string {
 		config.dtype ?? "",
 		config.remoteHost ?? "",
 		config.remotePathTemplate ?? "",
+		config.rawLogits ? "raw" : "sigmoid",
 	].join("\u0000");
 }
