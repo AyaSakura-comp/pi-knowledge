@@ -1,5 +1,5 @@
 export type RerankerProvider = "hf" | "api";
-export type ApiRerankerFormat = "cohere" | "jina" | "custom-json";
+export type ApiRerankerFormat = "cohere" | "jina" | "custom-json" | "tei";
 export type ApiScoreDirection = "desc" | "asc";
 
 export interface HfRerankerConfig {
@@ -89,7 +89,9 @@ function parseNumber(value: string | undefined, fallback: number, min: number, m
 function normalizeApiFormat(value: string | undefined): ApiRerankerFormat {
 	if (value === undefined) return "cohere";
 	const normalized = value.toLowerCase();
-	if (normalized === "cohere" || normalized === "jina" || normalized === "custom-json") return normalized;
+	if (normalized === "cohere" || normalized === "jina" || normalized === "custom-json" || normalized === "tei") {
+		return normalized;
+	}
 	throw new Error(`Unsupported reranker API format: ${value}`);
 }
 
@@ -121,12 +123,13 @@ function resolveApiRerankerConfig(model: string, env: NodeJS.ProcessEnv): ApiRer
 					"https://api.cohere.com/v2",
 			),
 	);
+	const format = normalizeApiFormat(cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_FORMAT));
 	return {
 		provider: "api",
 		model,
 		endpoint,
 		apiKey: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_KEY) ?? cleanEnv(env.OPENAI_API_KEY),
-		format: normalizeApiFormat(cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_FORMAT)),
+		format,
 		timeoutMs: parseNumber(
 			cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS),
 			DEFAULT_RERANKER_API_TIMEOUT_MS,
@@ -139,9 +142,9 @@ function resolveApiRerankerConfig(model: string, env: NodeJS.ProcessEnv): ApiRer
 			100,
 			200_000,
 		),
-		resultsPath: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH) ?? "results",
+		resultsPath: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH) ?? (format === "tei" ? "" : "results"),
 		indexField: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD) ?? "index",
-		scoreField: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD) ?? "relevance_score",
+		scoreField: cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD) ?? (format === "tei" ? "score" : "relevance_score"),
 		scoreDirection: normalizeScoreDirection(cleanEnv(env.PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION)),
 	};
 }

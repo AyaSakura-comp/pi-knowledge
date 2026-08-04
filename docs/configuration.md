@@ -45,15 +45,17 @@ Each KB stores the embedding model label, vector dimension, and a non-secret emb
 | `PI_KNOWLEDGE_RERANKER_API_ENDPOINT` | derived from base URL | Full HTTP rerank endpoint. Takes precedence over `PI_KNOWLEDGE_RERANKER_API_BASE_URL` and `OPENAI_BASE_URL`. |
 | `PI_KNOWLEDGE_RERANKER_API_BASE_URL` | `https://api.cohere.com/v2` | Base URL for Cohere/Jina-compatible `/rerank` APIs. `OPENAI_BASE_URL` is accepted only as a convenience fallback for gateways exposing the same schema. |
 | `PI_KNOWLEDGE_RERANKER_API_KEY` | `OPENAI_API_KEY` fallback | Bearer token for API rerankers. Omit only for trusted local services that do not require auth. |
-| `PI_KNOWLEDGE_RERANKER_API_FORMAT` | `cohere` | Request/response preset: `cohere`, `jina`, or `custom-json`. All presets send `model`, `query`, `documents`, `top_n`, and `return_documents:false`. |
+| `PI_KNOWLEDGE_RERANKER_API_FORMAT` | `cohere` | Request/response preset: `cohere`, `jina`, `custom-json`, or `tei`. Cohere/Jina-compatible presets send `model`, `query`, `documents`, `top_n`, and `return_documents:false`; `tei` sends `query` plus `texts` and parses a root response array with `index`/`score`. |
 | `PI_KNOWLEDGE_RERANKER_API_TIMEOUT_MS` | `30000` | Per-request timeout for API reranking. |
 | `PI_KNOWLEDGE_RERANKER_MAX_DOC_CHARS` | `12000` | Per-candidate document safety cap before sending content to the API. |
-| `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH` | `results` | Dot path to the result array for `custom-json` or compatible responses. |
+| `PI_KNOWLEDGE_RERANKER_API_RESULTS_PATH` | `results` (`tei`: root response array) | Dot path to the result array for `custom-json` or compatible responses. |
 | `PI_KNOWLEDGE_RERANKER_API_INDEX_FIELD` | `index` | Field name or dot path holding the original candidate index. |
-| `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD` | `relevance_score` | Field name or dot path holding the rerank score. |
+| `PI_KNOWLEDGE_RERANKER_API_SCORE_FIELD` | `relevance_score` (`tei`: `score`) | Field name or dot path holding the rerank score. |
 | `PI_KNOWLEDGE_RERANKER_API_SCORE_DIRECTION` | `desc` | Sort direction for returned scores: `desc` when higher is better, `asc` when lower is better. |
 
 Reranker settings affect query-time `deep` search only; they do not change indexed KB vectors. Local/HF rerankers run in the isolated model worker. Offline mode sets the model worker to local-only loading, so a local/HF reranker must already exist in the model cache. `PI_KNOWLEDGE_RERANKER_RAW_LOGITS=true` switches local/HF rerankers from the Transformers.js text-classification pipeline to direct sequence-classification logits and is intended only for trusted single-logit reranker models; use trusted model repositories or pinned revisions for non-default artifacts. API rerankers send the query and selected candidate chunk content to the configured external service; failures surface by default and do not silently fall back to the local worker.
+
+For Hugging Face Text Embeddings Inference rerankers, set `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei` and point `PI_KNOWLEDGE_RERANKER_API_ENDPOINT` at the TEI `/rerank` endpoint, for example `http://127.0.0.1:8080/rerank`. Do not reuse an embeddings `OPENAI_BASE_URL` ending in `/v1` unless the reranker endpoint actually exists there; TEI's OpenAI-compatible route covers embeddings, while reranking uses `/rerank`.
 
 Local embeddings require a real Node 22+ executable for the isolated model worker. `pi-knowledge` first tries Node IPC and automatically falls back to a stdin/stdout JSONL worker transport when the host runtime does not expose `child_process.fork().send()`, which can happen in Windows OMP compatibility layers. On Windows it searches `PI_KNOWLEDGE_NODE_PATH`, persisted `knowledge_configure` settings, common Node, Volta, NVM, Codex `cua_node`, and `PATH` locations before failing. If worker startup still fails, call `knowledge_configure` with the full `node.exe` path such as `C:\Program Files\nodejs\node.exe`; accidental surrounding quotes are ignored. OpenAI-compatible embeddings avoid the local worker entirely.
 

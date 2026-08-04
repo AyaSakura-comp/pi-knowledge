@@ -184,6 +184,8 @@ Full configuration details are in [docs/configuration.md](docs/configuration.md)
 | Runtime features | `PI_KNOWLEDGE_WATCH`, `PI_KNOWLEDGE_AUTO_INJECT`, `PI_KNOWLEDGE_STALE_INDEXING_MS`, `PI_KNOWLEDGE_OFFLINE`, `PI_KNOWLEDGE_SEARCH_PROFILE`, `PI_KNOWLEDGE_SEARCH_DEFAULT_LIMIT`, `PI_KNOWLEDGE_SNIPPET_MAX_LENGTH`, `PI_KNOWLEDGE_MIN_HYBRID_SCORE`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MIN`, `PI_KNOWLEDGE_SEARCH_CANDIDATE_MULTIPLIER`, `PI_KNOWLEDGE_ADAPTIVE_CONTEXT_LINES`, `PI_KNOWLEDGE_ADAPTIVE_MAX_CHARS`, `PI_KNOWLEDGE_ADAPTIVE_NEIGHBOR_TARGET`, `PI_KNOWLEDGE_DEEP_RERANK_CANDIDATES`, `PI_KNOWLEDGE_DEEP_RERANK_TOPK_MULTIPLIER` |
 | Release fixtures | `PI_KNOWLEDGE_E2E_PDF`, `PI_KNOWLEDGE_E2E_DOCX` |
 
+For Hugging Face Text Embeddings Inference rerankers, use `PI_KNOWLEDGE_RERANKER=api:<model>`, `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei`, and `PI_KNOWLEDGE_RERANKER_API_ENDPOINT=http://127.0.0.1:8080/rerank`; TEI exposes OpenAI-compatible embeddings under `/v1`, but reranking uses `/rerank`.
+
 ## Pi and OMP Support
 
 `pi-knowledge` supports Pi and [OMP](https://omp.sh/) extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.

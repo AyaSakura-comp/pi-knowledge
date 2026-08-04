@@ -96,6 +96,25 @@ describe("reranker config", () => {
 		});
 	});
 
+	it("parses TEI API format with root-array score defaults", () => {
+		const config = resolveRerankerConfig({
+			PI_KNOWLEDGE_RERANKER: "api:BAAI/bge-reranker-v2-m3",
+			PI_KNOWLEDGE_RERANKER_API_BASE_URL: "http://127.0.0.1:8080",
+			PI_KNOWLEDGE_RERANKER_API_FORMAT: "tei",
+		});
+
+		expect(config).toMatchObject({
+			provider: "api",
+			model: "BAAI/bge-reranker-v2-m3",
+			endpoint: "http://127.0.0.1:8080/rerank",
+			format: "tei",
+			resultsPath: "",
+			indexField: "index",
+			scoreField: "score",
+			scoreDirection: "desc",
+		});
+	});
+
 	it("parses custom API endpoint and mapping values", () => {
 		const config = resolveRerankerConfig({
 			PI_KNOWLEDGE_RERANKER: "api:rerank-v1",

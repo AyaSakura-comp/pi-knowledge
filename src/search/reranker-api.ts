@@ -47,13 +47,14 @@ function mapApiResult(result: unknown, candidates: RerankCandidate[], config: Ap
 }
 
 function requestBody(query: string, candidates: RerankCandidate[], topK: number, config: ApiRerankerConfig): string {
-	const documents = candidates.map((candidate) => {
-		const text =
-			candidate.content.length > config.maxDocumentChars
-				? candidate.content.slice(0, config.maxDocumentChars)
-				: candidate.content;
-		return config.format === "custom-json" ? { id: candidate.chunkId, text } : text;
-	});
+	const texts = candidates.map((candidate) =>
+		candidate.content.length > config.maxDocumentChars
+			? candidate.content.slice(0, config.maxDocumentChars)
+			: candidate.content,
+	);
+	if (config.format === "tei") return JSON.stringify({ query, texts });
+	const documents =
+		config.format === "custom-json" ? texts.map((text, index) => ({ id: candidates[index].chunkId, text })) : texts;
 	return JSON.stringify({
 		model: config.model,
 		query,

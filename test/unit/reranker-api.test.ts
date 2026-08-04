@@ -62,6 +62,42 @@ describe("API reranker", () => {
 		});
 	});
 
+	it("sends TEI rerank requests and maps root array scores", async () => {
+		const fetchMock = vi.fn(async (_input: URL | string, _init?: RequestInit) =>
+			jsonResponse([
+				{ index: 0, score: 0.12 },
+				{ index: 1, score: 0.98 },
+			]),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const results = await rerankViaApi(
+			"query",
+			[
+				{ chunkId: "chunk-a", content: "first document content" },
+				{ chunkId: "chunk-b", content: "second document content" },
+			],
+			1,
+			{
+				...baseConfig,
+				apiKey: undefined,
+				format: "tei",
+				resultsPath: "",
+				scoreField: "score",
+			},
+		);
+
+		expect(results).toEqual([{ chunkId: "chunk-b", score: 0.98 }]);
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(String(url)).toBe("http://127.0.0.1:8080/v1/rerank");
+		expect(init?.method).toBe("POST");
+		expect(init?.headers).toEqual({ "Content-Type": "application/json" });
+		expect(JSON.parse(String(init?.body))).toEqual({
+			query: "query",
+			texts: ["first document c", "second document "],
+		});
+	});
+
 	it("supports custom JSON result paths and ascending scores", async () => {
 		vi.stubGlobal(
 			"fetch",
