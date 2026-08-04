@@ -1,6 +1,12 @@
 # Changelog
 
 
+## [0.8.0] - 2026-08-04
+
+### Added
+- Added Hugging Face Text Embeddings Inference reranker API format support through `PI_KNOWLEDGE_RERANKER_API_FORMAT=tei`.
+
+
 ## [0.7.0] - 2026-07-28
 
 ### Added
