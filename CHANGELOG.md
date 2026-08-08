@@ -1,6 +1,11 @@
 # Changelog
 
 
+## [0.8.1] - 2026-08-08
+
+### Fixed
+- Declared host approval tiers for public knowledge tools so read-only search no longer defaults to exec approval in OMP headless sessions (#10).
+
 ## [0.8.0] - 2026-08-04
 
 ### Added
