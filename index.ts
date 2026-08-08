@@ -4,10 +4,12 @@ type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
 
 type ToolResult = { content: Array<{ type: "text"; text: string }>; details?: unknown; isError?: boolean };
 type ToolUpdate = (result: ToolResult) => void;
+type ToolApproval = "read" | "write" | "exec";
 type ToolDefinition = {
 	name: string;
 	label: string;
 	description: string;
+	approval?: ToolApproval;
 	promptSnippet?: string;
 	promptGuidelines?: string[];
 	parameters: Schema;
@@ -244,6 +246,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Knowledge Plan",
 		description:
 			"Inspect an indexing source without writing a KB, showing scannable counts, suggested exclusions, and technical skips",
+		approval: "read",
 		promptSnippet: "Plan a knowledge-base indexing scope before calling knowledge_add",
 		promptGuidelines: [
 			"Use knowledge_plan before knowledge_add for broad directories, large repositories, or sources that may contain private or low-signal text",
@@ -315,6 +318,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_configure",
 		label: "Knowledge Configure",
 		description: "Configure pi-knowledge runtime settings such as the local model worker Node executable",
+		approval: "write",
 		promptSnippet: "Configure local pi-knowledge runtime prerequisites before indexing",
 		promptGuidelines: [
 			"Use knowledge_configure when knowledge_doctor or knowledge_add reports that local embeddings cannot find a usable Node executable",
@@ -352,6 +356,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_add",
 		label: "Knowledge Add",
 		description: "Index files, directories, URLs, PDFs, DOCX, or text into a named knowledge base for semantic search",
+		approval: "write",
 		promptSnippet: "Index files/dirs/URLs/PDFs/DOCX/text into a searchable knowledge base",
 		promptGuidelines: [
 			"Use knowledge_plan first for broad directories, large repositories, or sources that may contain private or low-signal text",
@@ -448,6 +453,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_search",
 		label: "Knowledge Search",
 		description: "Search indexed knowledge bases using lexical BM25, semantic vectors, reranking, and filters",
+		approval: "read",
 		promptSnippet: "Search knowledge bases (hybrid is lexical-anchored BM25 + semantic fusion)",
 		promptGuidelines: [
 			"Use knowledge_search to find relevant context before answering domain questions",
@@ -589,6 +595,7 @@ export default function (pi: ExtensionAPI) {
 		label: "Knowledge Symbol Search",
 		description:
 			"Search indexed code symbols, Markdown headings, config keys, and environment variables exactly or by substring",
+		approval: "read",
 		promptSnippet: "Find exact symbols/config keys/headings before broad semantic search",
 		promptGuidelines: [
 			"Use knowledge_symbol_search before knowledge_search when looking for a function, class, env var, config key, route, or Markdown heading",
@@ -663,6 +670,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_update",
 		label: "Knowledge Update",
 		description: "Incrementally re-index a source-backed knowledge base with a retained file, directory, or URL source",
+		approval: "write",
 		promptSnippet: "Refresh an existing source-backed KB",
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to update" }),
@@ -686,6 +694,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_status",
 		label: "Knowledge Status",
 		description: "Show knowledge engine status with health diagnostics: staleness, orphans, and coverage",
+		approval: "read",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
@@ -763,6 +772,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_doctor",
 		label: "Knowledge Doctor",
 		description: "Diagnose knowledge base health, skipped files, stale indexes, stuck jobs, and recommended fixes",
+		approval: "read",
 		promptSnippet: "Diagnose knowledge base health and recommended actions",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
@@ -787,6 +797,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_show",
 		label: "Knowledge Show",
 		description: "List all indexed knowledge bases",
+		approval: "read",
 		parameters: Type.Object({}),
 		async execute(_id, _params, _signal) {
 			if (_signal?.aborted) throw new Error("Cancelled");
@@ -803,6 +814,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_remove",
 		label: "Knowledge Remove",
 		description: "Remove a knowledge base by name or ID after explicit confirmation",
+		approval: "write",
 		promptGuidelines: [
 			"Destructive: only call after the user explicitly asks to remove knowledge data or confirms a proposed removal",
 			"Prefer knowledge_status or knowledge_doctor before removing data for troubleshooting",
@@ -828,6 +840,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_export",
 		label: "Knowledge Export",
 		description: "Export a knowledge base to a JSONL file (shareable, git-friendly)",
+		approval: "write",
 		parameters: Type.Object({
 			target: Type.String({ description: "KB name or ID to export" }),
 			output: Type.String({ description: "Output file path (.jsonl)" }),
@@ -846,6 +859,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_import",
 		label: "Knowledge Import",
 		description: "Import a knowledge base from a JSONL file (re-embeds content)",
+		approval: "write",
 		parameters: Type.Object({
 			input: Type.String({ description: "Input JSONL file path" }),
 		}),
@@ -866,6 +880,7 @@ export default function (pi: ExtensionAPI) {
 		name: "knowledge_clear",
 		label: "Knowledge Clear",
 		description: "Remove all knowledge bases after explicit confirmation",
+		approval: "write",
 		promptGuidelines: [
 			"Destructive: only call after the user explicitly asks to clear all knowledge data or confirms a proposed clear",
 			"Never use knowledge_clear as troubleshooting unless the user explicitly approves",

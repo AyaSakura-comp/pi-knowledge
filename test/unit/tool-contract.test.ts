@@ -158,6 +158,27 @@ describe("public tool contracts", () => {
 		toolState.clearCalls = 0;
 	});
 
+	it("declares host approval tiers for every public tool", async () => {
+		const tools = await registeredTools();
+		const approvalTiers = Object.fromEntries(Object.entries(tools).map(([name, tool]) => [name, tool.approval]));
+
+		expect(approvalTiers).toEqual({
+			knowledge_add: "write",
+			knowledge_clear: "write",
+			knowledge_configure: "write",
+			knowledge_doctor: "read",
+			knowledge_export: "write",
+			knowledge_import: "write",
+			knowledge_plan: "read",
+			knowledge_remove: "write",
+			knowledge_search: "read",
+			knowledge_show: "read",
+			knowledge_status: "read",
+			knowledge_symbol_search: "read",
+			knowledge_update: "write",
+		});
+	});
+
 	it("exposes structured doctor actions", async () => {
 		const tools = await registeredTools();
 		const result = await tools.knowledge_doctor.execute?.("doctor", {}, undefined, undefined, undefined);
