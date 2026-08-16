@@ -77,11 +77,13 @@
 
 ---
 
-## ADR-006: 儲存 ~/.pi/knowledge/ (global) + .pi/knowledge/ (project)
+## ADR-006: 每個 Pi session 使用獨立 RAG database
 
-**狀態**: 已決定
+**狀態**: fork 已採用；取代原本的 global KB 儲存決策
 
-**理由**: 知識庫是獨立功能，不嵌套 agent/ 下。
+**行為**: 持久化 session 將 SQLite 與 vectors 儲存在 `<session-file-directory>/knowledge/<session-id>/`。沒有 session file 的 ephemeral session 使用 `<host-knowledge-dir>/knowledge/<session-id>/`。共用 runtime config 與模型快取仍位於 host knowledge directory。
+
+**理由**: 不同 session 的來源、索引名稱及搜尋結果必須互相隔離；恢復同一 session 時仍可重用該 session 的 RAG data。
 
 ---
 

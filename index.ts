@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path";
+
 type KnowledgeEngineInstance = import("./src/engine.ts").KnowledgeEngine;
 type StorageRuntime = typeof import("./src/storage/sqlite.ts");
 type WatcherRuntime = typeof import("./src/watcher/file-watcher.ts");
@@ -23,13 +25,19 @@ type ToolDefinition = {
 };
 type ContextEvent = { messages: Array<{ role: string; content?: unknown }> };
 type BeforeAgentStartEvent = { systemPrompt: string };
+type ExtensionContext = {
+	sessionManager?: {
+		getSessionFile(): string | undefined;
+		getSessionId(): string;
+	};
+};
 type ExtensionAPI = {
 	on(event: "context", handler: (event: ContextEvent, ctx: unknown) => unknown): void;
 	on(
 		event: "before_agent_start",
 		handler: (event: BeforeAgentStartEvent, ctx: unknown) => unknown | Promise<unknown>,
 	): void;
-	on(event: "session_start" | "session_shutdown", handler: (event: unknown, ctx: unknown) => unknown): void;
+	on(event: "session_start" | "session_shutdown", handler: (event: unknown, ctx: ExtensionContext) => unknown): void;
 	registerTool(tool: ToolDefinition): void;
 };
 
@@ -131,12 +139,20 @@ async function loadRuntime(): Promise<Runtime> {
 	return runtimePromise;
 }
 
-async function ensureInitialized(): Promise<Runtime> {
+function getSessionKnowledgeDir(ctx: ExtensionContext, defaultKnowledgeDir: string): string {
+	const sessionId = ctx.sessionManager?.getSessionId();
+	if (!sessionId) return defaultKnowledgeDir;
+	const sessionFile = ctx.sessionManager?.getSessionFile();
+	const rootDir = sessionFile ? dirname(sessionFile) : defaultKnowledgeDir;
+	return join(rootDir, "knowledge", encodeURIComponent(sessionId));
+}
+
+async function ensureInitialized(knowledgeDir?: string): Promise<Runtime> {
 	if (disposePromise) await disposePromise;
 	if (initialized && runtime) return runtime;
 	initializePromise ??= (async () => {
 		const loaded = await loadRuntime();
-		await loaded.engine.initialize(loaded.storage.getDefaultKnowledgeDir());
+		await loaded.engine.initialize(knowledgeDir ?? loaded.storage.getDefaultKnowledgeDir());
 		initialized = true;
 		return loaded;
 	})();
@@ -184,8 +200,10 @@ async function disposeRuntime(): Promise<void> {
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("session_start", async () => {
-		const { engine, watcher } = await ensureInitialized();
+	pi.on("session_start", async (_event, ctx) => {
+		const loaded = await loadRuntime();
+		const knowledgeDir = getSessionKnowledgeDir(ctx, loaded.storage.getDefaultKnowledgeDir());
+		const { engine, watcher } = await ensureInitialized(knowledgeDir);
 		if (WATCH_ENABLED) {
 			for (const kb of engine.list()) {
 				if (kb.source_path && kb.source_type === "directory") {

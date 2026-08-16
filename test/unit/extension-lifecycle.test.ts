@@ -9,6 +9,7 @@ const lifecycle = vi.hoisted(() => {
 		resolveInitializeStarted: () => resolveInitializeStarted?.(),
 		resolveInitialize: () => resolveInitialize?.(),
 		initializeCount: 0,
+		initializeDirs: [] as string[],
 		disposeCount: 0,
 		stopWatcherCount: 0,
 		reset(): void {
@@ -19,6 +20,7 @@ const lifecycle = vi.hoisted(() => {
 				resolveInitialize = resolve;
 			});
 			state.initializeCount = 0;
+			state.initializeDirs = [];
 			state.disposeCount = 0;
 			state.stopWatcherCount = 0;
 		},
@@ -29,8 +31,9 @@ const lifecycle = vi.hoisted(() => {
 
 vi.mock("../../src/engine.ts", () => ({
 	KnowledgeEngine: class {
-		async initialize(): Promise<void> {
+		async initialize(knowledgeDir: string): Promise<void> {
 			lifecycle.initializeCount += 1;
+			lifecycle.initializeDirs.push(knowledgeDir);
 			lifecycle.resolveInitializeStarted();
 			await lifecycle.initializeFinished;
 		}
@@ -83,7 +86,14 @@ describe("extension lifecycle", () => {
 		const shutdownHandler = handlers.session_shutdown?.[0];
 		if (!startHandler || !shutdownHandler) throw new Error("Lifecycle handlers were not registered");
 
-		const start = Promise.resolve(startHandler());
+		const start = Promise.resolve(
+			startHandler(undefined, {
+				sessionManager: {
+					getSessionFile: () => "/tmp/pi-sessions/2026-08-16_session-a.jsonl",
+					getSessionId: () => "session-a",
+				},
+			}),
+		);
 		await lifecycle.initializeStarted;
 		const shutdown = Promise.resolve(shutdownHandler());
 
@@ -91,6 +101,7 @@ describe("extension lifecycle", () => {
 		await Promise.all([start, shutdown]);
 
 		expect(lifecycle.initializeCount).toBe(1);
+		expect(lifecycle.initializeDirs).toEqual(["/tmp/pi-sessions/knowledge/session-a"]);
 		expect(lifecycle.stopWatcherCount).toBe(1);
 		expect(lifecycle.disposeCount).toBe(1);
 	});

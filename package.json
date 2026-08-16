@@ -1,6 +1,6 @@
 {
-	"name": "pi-knowledge",
-	"version": "0.8.1",
+	"name": "pi-knowledge-session",
+	"version": "0.8.1-session.1",
 	"description": "Local-first RAG knowledge base for Pi and OMP coding agents with hybrid code/doc search, reranking, diagnostics, and large-project indexing",
 	"type": "module",
 	"main": "dist/index.js",
@@ -75,6 +75,6 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/nczz/pi-knowledge.git"
+		"url": "git+https://github.com/AyaSakura-comp/pi-knowledge.git"
 	}
 }

@@ -1,20 +1,20 @@
 # Configuration
 
-`pi-knowledge` is local-first by default, but several environment variables are available for runtime selection, compatibility, and release validation.
+`pi-knowledge-session` is local-first and session-isolated by default, but several environment variables are available for runtime selection, compatibility, and release validation.
 
 ## Storage and Host Runtime
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PI_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the directory that stores `knowledge.db`, vectors, and model cache parent data for Pi and OMP. Takes precedence over `OMP_KNOWLEDGE_DIR`. |
-| `OMP_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the knowledge directory when running under OMP. Used when `PI_KNOWLEDGE_DIR` is not set. |
+| `PI_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the fallback root for ephemeral session databases, shared runtime configuration, and model cache data. Persisted session databases remain beside their session files. Takes precedence over `OMP_KNOWLEDGE_DIR`. |
+| `OMP_KNOWLEDGE_DIR` | host-derived knowledge dir | Override the same fallback/shared root when running under OMP. Used when `PI_KNOWLEDGE_DIR` is not set. |
 | `PI_CODING_AGENT_DIR` | unset | Derive the Pi host root from a configured agent directory. Useful for isolated installs and validation. |
 | `OMP_CODING_AGENT_DIR` | unset | Derive the OMP host root from a configured agent directory. Used when `PI_CODING_AGENT_DIR` is not set. |
 | `OMP_PROFILE` | unset | Treat the current process as OMP-hosted for default path selection. |
 | `PI_KNOWLEDGE_MODEL_CACHE_DIR` | `<knowledge-dir>/models` | Override the local Transformers.js model cache directory. |
 | `PI_KNOWLEDGE_NODE_PATH` | current Node when possible, then `NODE`, then `node` on `PATH` | Override the Node 22+ executable used to run the isolated model worker. Useful for Windows OMP packaged runtimes where the host process is not Node. |
 
-Default data storage is `~/.pi/knowledge` under Pi and `~/.omp/knowledge` under OMP. For the default home OMP root, `pi-knowledge` preserves an existing legacy `~/.pi/knowledge` directory when `~/.omp/knowledge` does not exist, so existing Pi knowledge bases remain visible during migration.
+For a persisted session, the database and vectors are stored under `<session-file-directory>/knowledge/<session-id>/`. For an ephemeral session with no session file, they are stored under `<host-knowledge-dir>/knowledge/<session-id>/`. Shared runtime configuration and the default model cache use `~/.pi/knowledge` under Pi or `~/.omp/knowledge` under OMP. Existing global KBs are not automatically migrated into session-specific databases.
 
 ## Embeddings
 

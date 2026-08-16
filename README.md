@@ -1,8 +1,8 @@
-# pi-knowledge
+# pi-knowledge-session
 
-Local-first RAG knowledge base for Pi and OMP coding agents.
+Session-isolated local-first RAG knowledge base for Pi and OMP coding agents. This fork is based on `pi-knowledge` 0.8.1.
 
-Index your codebase, docs, PDFs, URLs, and notes into persistent knowledge bases that Pi and [OMP](https://omp.sh/) can search across sessions. `pi-knowledge` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
+Index your codebase, docs, PDFs, URLs, and notes into knowledge bases private to the active Pi session. `pi-knowledge-session` combines semantic embeddings, BM25 keyword search, code-aware chunking, reranking, diagnostics, and stable large-project indexing so agents can answer from your actual project knowledge instead of guessing.
 
 Built as a native [Pi extension](https://pi.dev/docs/latest/extensions) with verified [OMP](https://omp.sh/) compatibility through the packaged extension entry. Designed for local-first project memory, agentic code search, and retrieval-augmented development workflows.
 
@@ -21,7 +21,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 
 ## Highlights
 
-- **Local-first project memory**: stores indexes under `~/.pi/knowledge/`; no project files are modified.
+- **Session-isolated project memory**: stores each persisted session under `<session-dir>/knowledge/<session-id>/`; no indexed project files are modified.
 - **Hybrid retrieval**: lexical-anchored BM25 + semantic vectors + normalized weighted score fusion, with semantic mode for vector-only conceptual recall.
 - **Code-aware indexing**: AST-aware chunking for TypeScript/JavaScript, Python, Go, Rust, and Java.
 - **Lightweight symbol lookup**: indexes functions, classes, interfaces, types, variables, route-like handlers, Markdown headings, config keys, and env vars for exact agent lookup.
@@ -49,7 +49,7 @@ Unlike `pi-memory` (which manages the agent's own notes), `pi-knowledge` indexes
 | **Index quality diagnostics** | ✅ | ❌ | ❌ |
 | **Metadata filters in search** | ✅ | ❌ | ❌ |
 | **Progress reporting + stuck indexing diagnostics** | ✅ | partial | ❌ |
-| Cross-session persistence | ✅ | ✅ | ✅ |
+| Cross-session persistence | ❌ (session-isolated) | ✅ | ✅ |
 | Pi extension native | ✅ | N/A | ✅ |
 | Context injection per turn | ✅ | ❌ | ✅ |
 | Search result TUI rendering | ✅ | N/A | ❌ |
@@ -190,7 +190,7 @@ For Hugging Face Text Embeddings Inference rerankers, use `PI_KNOWLEDGE_RERANKER
 
 `pi-knowledge` supports Pi and [OMP](https://omp.sh/) extension loading through the packaged `extension.js` entry shim. The entry stays startup-light: install-time validation can inspect the extension without resolving native runtime dependencies, and runtime modules load lazily only when tools or lifecycle hooks need them.
 
-Default storage is `~/.pi/knowledge` for Pi and `~/.omp/knowledge` for OMP. Explicit overrides are available with `PI_KNOWLEDGE_DIR` and `OMP_KNOWLEDGE_DIR`. Under the default home OMP root, existing legacy `~/.pi/knowledge` data remains visible when `~/.omp/knowledge` has not been created yet.
+Persisted sessions store their database and vectors under `<session-file-directory>/knowledge/<session-id>/`. Ephemeral sessions fall back to `<host-knowledge-dir>/knowledge/<session-id>/`, where the host knowledge directory is selected from `PI_KNOWLEDGE_DIR`, `OMP_KNOWLEDGE_DIR`, or the Pi/OMP defaults. Runtime configuration and the default model cache remain shared at the host knowledge directory.
 
 OMP compatibility covers path resolution, packaged entry loading, native SQLite dependency resolution, isolated model-worker startup, Windows-safe worker transport fallback, and idempotent shutdown. Local embeddings require Node 22+ for the isolated worker; set `PI_KNOWLEDGE_NODE_PATH` to `node.exe` if OMP runs from a non-Node packaged host. Compatibility-sensitive releases should validate both Pi and OMP install/runtime flows.
 
@@ -210,18 +210,22 @@ Update and diagnostics paths are also streaming-oriented: changed chunks are emb
 
 ## Data Storage
 
-All data is stored globally at `~/.pi/knowledge/` under Pi or `~/.omp/knowledge/` under OMP unless overridden (never in your project directory):
+Each persisted Pi session gets an independent database and vector directory beside its session file:
 
 ```
-~/.pi/knowledge/
-├── knowledge.db      ← SQLite (metadata + chunks + FTS5 index)
-├── vectors/          ← Embedding vectors per KB (binary)
-└── models/           ← Downloaded ONNX models (~32MB, cached)
+<session-file-directory>/
+├── <session-file>.jsonl
+└── knowledge/
+    └── <session-id>/
+        ├── knowledge.db  ← SQLite (metadata + chunks + FTS5 index)
+        └── vectors/      ← Embedding vectors per KB (binary)
 ```
 
-- **Backup**: copy the active knowledge directory, usually `~/.pi/knowledge/` or `~/.omp/knowledge/`
-- **Reset**: delete the active knowledge directory to start fresh
-- **Override**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
+Shared runtime configuration and downloaded ONNX models remain under the host knowledge directory, normally `~/.pi/knowledge/` for Pi or `~/.omp/knowledge/` for OMP.
+
+- **Backup**: copy the session's `knowledge/<session-id>/` directory
+- **Reset**: delete that session-specific directory to start its RAG state fresh
+- **Ephemeral session root**: set `PI_KNOWLEDGE_DIR` or `OMP_KNOWLEDGE_DIR`
 - **Project safety**: pi-knowledge is read-only on indexed directories — no files are created or modified in your project
 - **Updates**: extension updates do not affect existing indexed data. Schema migrations run automatically if needed.
 - **Symbol index**: `knowledge.db` also stores lightweight symbol/config/heading metadata used by `knowledge_symbol_search`; it is derived from indexed source. File, directory, and URL KBs with retained source paths can rebuild it with `knowledge_update`; imported portable KBs and inline text KBs should be re-imported or re-added because they intentionally do not store an active local source manifest.

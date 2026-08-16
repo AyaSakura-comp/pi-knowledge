@@ -72,6 +72,7 @@
 ## Extension Development
 
 - Entry point: `index.ts` (default export ExtensionFactory)
+- Session storage is a behavior contract: every persisted Pi session uses `<session-file-directory>/knowledge/<session-id>/`; ephemeral sessions use `<host-knowledge-dir>/knowledge/<session-id>/`. Never silently fall back to a shared database when a session ID is available.
 - Test with: `pi -e ./index.ts` (direct load, no install needed)
 - Install locally: `pi install ./` (from project root)
 - All tools must handle `signal?.aborted` for cancellation
